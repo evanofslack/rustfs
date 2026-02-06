@@ -34,6 +34,7 @@ gpu = ["dep:nvml-wrapper"]
 full = ["gpu"]
 
 [dependencies]
+console-subscriber = { workspace = true }
 rustfs-config = { workspace = true, features = ["constants", "observability"] }
 rustfs-utils = { workspace = true, features = ["ip", "path"] }
 flexi_logger = { workspace = true }

@@ -230,7 +230,10 @@ fn init_stdout_logging(_config: &OtelConfig, logger_level: &str, is_production: 
         .with_current_span(true)
         .with_span_list(true)
         .with_span_events(if is_production { FmtSpan::CLOSE } else { FmtSpan::FULL });
+    let console_layer = console_subscriber::spawn();
+
     tracing_subscriber::registry()
+        .with(console_layer)
         .with(env_filter)
         .with(ErrorLayer::default())
         .with(fmt_layer)
@@ -532,7 +535,10 @@ fn init_observability_http(config: &OtelConfig, logger_level: &str, is_productio
         .map(|p| OpenTelemetryLayer::new(p.tracer(service_name.to_string())));
     let metrics_layer = meter_provider.as_ref().map(|p| MetricsLayer::new(p.clone()));
 
+    let console_layer = console_subscriber::spawn();
+
     tracing_subscriber::registry()
+        .with(console_layer)
         .with(filter)
         .with(ErrorLayer::default())
         .with(fmt_layer_opt)

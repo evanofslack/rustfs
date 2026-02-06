@@ -9,17 +9,19 @@ RustFS is a high-performance distributed object storage software built with Rust
 ## ⚠️ Pre-Commit Checklist (MANDATORY)
 
 **Before EVERY commit, you MUST run and pass ALL of the following:**
+
 ```bash
 cargo fmt --all --check    # Code formatting
 cargo clippy --all-targets --all-features -- -D warnings  # Lints
 cargo test --workspace --exclude e2e_test  # Unit tests
 ```
+
 Or simply run `make pre-commit` which covers all checks. **DO NOT commit if any check fails.**
 
 ## Communication Rules
 
-- Respond to the user in Chinese; use English in all other contexts.
-- Code and documentation must be written in English only. Chinese text is allowed solely as test data/fixtures when a case explicitly requires Chinese-language content for validation.
+- English in all contexts.
+- Code and documentation must be written in English only.
 - **Pull Request titles and descriptions must be written in English** to ensure consistency and accessibility for all contributors.
 
 ## Project Structure
@@ -35,17 +37,20 @@ The workspace root hosts shared dependencies in `Cargo.toml`. The service binary
 ## Build, Test, and Development Commands
 
 ### Quick Commands
+
 - `cargo check --all-targets` - Fast validation
 - `cargo build --release` or `make build` - Release build
 - `./build-rustfs.sh --dev` - Development build with debug symbols
 - `make pre-commit` - Run all quality checks (fmt, clippy, check, test)
 
 ### Testing
+
 - `cargo test --workspace --exclude e2e_test` - Unit tests
 - `cargo test --package e2e_test` - E2E tests
 - For KMS tests: `NO_PROXY=127.0.0.1,localhost HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= cargo test --package e2e_test test_local_kms_end_to_end -- --nocapture --test-threads=1`
 
 ### Cross-Platform Builds
+
 - `./build-rustfs.sh --platform x86_64-unknown-linux-musl` - Build for musl
 - `./build-rustfs.sh --platform aarch64-unknown-linux-gnu` - Build for ARM64
 - `make build-cross-all` - Build all supported architectures
@@ -80,6 +85,7 @@ Co-locate unit tests with their modules and give behavior-led names. Integration
 Work on feature branches (e.g., `feat/...`) after syncing `main`. Follow Conventional Commits under 72 characters. Each commit must compile, format cleanly, and pass `make pre-commit`.
 
 **Pull Request Requirements:**
+
 - PR titles and descriptions **MUST be written in English**
 - Open PRs with a concise summary, note verification commands, link relevant issues
 - Follow the PR template format and fill in all required sections
@@ -97,5 +103,5 @@ Do not commit secrets or cloud credentials; prefer environment variables or vaul
 - Do what has been asked; nothing more, nothing less
 - NEVER create files unless they're absolutely necessary for achieving your goal
 - ALWAYS prefer editing an existing file to creating a new one
-- NEVER proactively create documentation files (*.md) or README files unless explicitly requested
+- NEVER proactively create documentation files (\*.md) or README files unless explicitly requested
 - NEVER commit PR description files (e.g., PR_DESCRIPTION.md): These are temporary reference files for creating pull requests and should remain local only
