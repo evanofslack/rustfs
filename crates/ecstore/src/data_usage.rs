@@ -29,7 +29,10 @@ use rustfs_common::data_usage::{
 use rustfs_utils::path::SLASH_SEPARATOR;
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 use tokio::fs;
@@ -44,17 +47,12 @@ pub const DATA_USAGE_CACHE_NAME: &str = ".usage-cache.bin";
 const DATA_USAGE_CACHE_TTL_SECS: u64 = 30;
 
 type UsageMemoryCache = Arc<RwLock<HashMap<String, (u64, SystemTime)>>>;
-type CacheUpdating = Arc<RwLock<bool>>;
 
 static USAGE_MEMORY_CACHE: OnceLock<UsageMemoryCache> = OnceLock::new();
-static USAGE_CACHE_UPDATING: OnceLock<CacheUpdating> = OnceLock::new();
+static CACHE_UPDATING: AtomicBool = AtomicBool::new(false);
 
 fn memory_cache() -> &'static UsageMemoryCache {
     USAGE_MEMORY_CACHE.get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
-}
-
-fn cache_updating() -> &'static CacheUpdating {
-    USAGE_CACHE_UPDATING.get_or_init(|| Arc::new(RwLock::new(false)))
 }
 
 // Data usage storage paths
@@ -432,23 +430,16 @@ async fn maybe_trigger_background_refresh() {
         return; // cache is fresh, nothing to do
     }
 
-    // Try to claim the refresh slot without blocking.
-    // If another task already holds the write lock or is refreshing, return.
-    let mut updating = match cache_updating().try_write() {
-        Ok(guard) => guard,
-        Err(_) => return,
-    };
-
-    if *updating {
-        return; // a refresh is already in progress
+    // Try to claim the refresh slot atomically. Exactly one caller wins.
+    if CACHE_UPDATING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return; // another task is already refreshing
     }
-
-    *updating = true;
-    drop(updating);
 
     // Spawn exactly one background refresh task
     let cache_clone = (*memory_cache()).clone();
-    let updating_clone = (*cache_updating()).clone();
     tokio::spawn(async move {
         if let Some(store) = crate::global::GLOBAL_OBJECT_API.get()
             && let Ok(data_usage_info) = load_data_usage_from_backend(store.clone()).await
@@ -458,8 +449,7 @@ async fn maybe_trigger_background_refresh() {
                 cache.insert(bucket_name.clone(), (bucket_usage.size, SystemTime::now()));
             }
         }
-        let mut updating = updating_clone.write().await;
-        *updating = false;
+        CACHE_UPDATING.store(false, Ordering::Release);
     });
 }
 
