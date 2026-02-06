@@ -1096,7 +1096,7 @@ impl LocalDisk {
             }
         }
 
-        entries.sort();
+        entries.sort_unstable();
 
         if let Some(forward) = &forward {
             for (i, entry) in entries.iter().enumerate() {
