@@ -676,7 +676,7 @@ impl LocalDisk {
     }
 
     /// read xl.meta raw data
-    #[tracing::instrument(level = "debug", skip(self, volume_dir, file_path))]
+    #[tracing::instrument(level = "trace", skip(self, volume_dir, file_path))]
     async fn read_raw(
         &self,
         bucket: &str,
@@ -753,7 +753,7 @@ impl LocalDisk {
         Ok(data)
     }
 
-    #[tracing::instrument(level = "debug", skip(self, volume_dir, file_path))]
+    #[tracing::instrument(level = "trace", skip(self, volume_dir, file_path))]
     async fn read_all_data_with_dmtime(
         &self,
         volume: &str,
@@ -1302,39 +1302,31 @@ fn normalize_path_components(path: impl AsRef<Path>) -> PathBuf {
 
 #[async_trait::async_trait]
 impl DiskAPI for LocalDisk {
-    #[tracing::instrument(skip(self))]
     fn to_string(&self) -> String {
         self.root.to_string_lossy().to_string()
     }
-    #[tracing::instrument(skip(self))]
     fn is_local(&self) -> bool {
         true
     }
-    #[tracing::instrument(skip(self))]
     fn host_name(&self) -> String {
         self.endpoint.host_port()
     }
-    #[tracing::instrument(skip(self))]
     async fn is_online(&self) -> bool {
         true
     }
 
-    #[tracing::instrument(skip(self))]
     fn endpoint(&self) -> Endpoint {
         self.endpoint.clone()
     }
 
-    #[tracing::instrument(skip(self))]
     async fn close(&self) -> Result<()> {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
     fn path(&self) -> PathBuf {
         self.root.clone()
     }
 
-    #[tracing::instrument(skip(self))]
     fn get_disk_location(&self) -> DiskLocation {
         DiskLocation {
             pool_idx: {
@@ -1422,13 +1414,12 @@ impl DiskAPI for LocalDisk {
         Ok(Some(disk_id))
     }
 
-    #[tracing::instrument(skip(self))]
     async fn set_disk_id(&self, _id: Option<Uuid>) -> Result<()> {
         // No setup is required locally
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn read_all(&self, volume: &str, path: &str) -> Result<Bytes> {
         if volume == RUSTFS_META_BUCKET && path == super::FORMAT_CONFIG_FILE {
             let format_info = self.format_info.read().await;
@@ -1449,7 +1440,7 @@ impl DiskAPI for LocalDisk {
         self.write_all_public(volume, path, data).await
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete(&self, volume: &str, path: &str, opt: DeleteOptions) -> Result<()> {
         let volume_dir = self.get_bucket_path(volume)?;
         if !skip_access_checks(volume)
@@ -1468,7 +1459,7 @@ impl DiskAPI for LocalDisk {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn verify_file(&self, volume: &str, path: &str, fi: &FileInfo) -> Result<CheckPartsResp> {
         let volume_dir = self.get_bucket_path(volume)?;
         if !skip_access_checks(volume)
@@ -1518,7 +1509,7 @@ impl DiskAPI for LocalDisk {
         Ok(resp)
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn read_parts(&self, bucket: &str, paths: &[String]) -> Result<Vec<ObjectPartInfo>> {
         let volume_dir = self.get_bucket_path(bucket)?;
 
@@ -1584,7 +1575,7 @@ impl DiskAPI for LocalDisk {
 
         Ok(ret)
     }
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn check_parts(&self, volume: &str, path: &str, fi: &FileInfo) -> Result<CheckPartsResp> {
         let volume_dir = self.get_bucket_path(volume)?;
         let file_path = self.get_object_path(volume, path)?;
@@ -1707,7 +1698,7 @@ impl DiskAPI for LocalDisk {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn rename_file(&self, src_volume: &str, src_path: &str, dst_volume: &str, dst_path: &str) -> Result<()> {
         let src_volume_dir = self.get_bucket_path(src_volume)?;
         let dst_volume_dir = self.get_bucket_path(dst_volume)?;
@@ -1862,7 +1853,7 @@ impl DiskAPI for LocalDisk {
 
         Ok(Box::new(f))
     }
-    #[tracing::instrument(level = "debug", skip(self))]
+    #[tracing::instrument(level = "trace", skip(self))]
     async fn list_dir(&self, origvolume: &str, volume: &str, dir_path: &str, count: i32) -> Result<Vec<String>> {
         if !origvolume.is_empty() {
             let origvolume_dir = self.get_bucket_path(origvolume)?;
@@ -1894,7 +1885,7 @@ impl DiskAPI for LocalDisk {
     }
 
     // FIXME: TODO: io.writer TODO cancel
-    #[tracing::instrument(level = "debug", skip(self, wr))]
+    #[tracing::instrument(level = "trace", skip(self, wr))]
     async fn walk_dir<W: AsyncWrite + Unpin + Send>(&self, opts: WalkDirOptions, wr: &mut W) -> Result<()> {
         let volume_dir = self.get_bucket_path(&opts.bucket)?;
 
@@ -2124,7 +2115,7 @@ impl DiskAPI for LocalDisk {
         })
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn make_volumes(&self, volumes: Vec<&str>) -> Result<()> {
         for vol in volumes {
             if let Err(e) = self.make_volume(vol).await
@@ -2138,7 +2129,7 @@ impl DiskAPI for LocalDisk {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn make_volume(&self, volume: &str) -> Result<()> {
         if !Self::is_valid_volname(volume) {
             return Err(Error::other("Invalid arguments specified"));
@@ -2158,7 +2149,7 @@ impl DiskAPI for LocalDisk {
         Err(DiskError::VolumeExists)
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn list_volumes(&self) -> Result<Vec<VolumeInfo>> {
         let mut volumes = Vec::new();
 
@@ -2178,7 +2169,7 @@ impl DiskAPI for LocalDisk {
         Ok(volumes)
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn stat_volume(&self, volume: &str) -> Result<VolumeInfo> {
         let volume_dir = self.get_bucket_path(volume)?;
         let meta = lstat(&volume_dir).await.map_err(to_volume_error)?;
@@ -2194,7 +2185,7 @@ impl DiskAPI for LocalDisk {
         })
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_paths(&self, volume: &str, paths: &[String]) -> Result<()> {
         let volume_dir = self.get_bucket_path(volume)?;
         if !skip_access_checks(volume) {
@@ -2214,7 +2205,7 @@ impl DiskAPI for LocalDisk {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn update_metadata(&self, volume: &str, path: &str, fi: FileInfo, opts: &UpdateMetadataOpts) -> Result<()> {
         if !fi.metadata.is_empty() {
             let file_path = self.get_object_path(volume, path)?;
@@ -2250,7 +2241,7 @@ impl DiskAPI for LocalDisk {
         Err(Error::other("Invalid Argument"))
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn write_metadata(&self, _org_volume: &str, volume: &str, path: &str, fi: FileInfo) -> Result<()> {
         let p = self.get_object_path(volume, format!("{path}/{STORAGE_FORMAT_FILE}").as_str())?;
 
@@ -2378,7 +2369,7 @@ impl DiskAPI for LocalDisk {
         Ok(RawFileInfo { buf })
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_version(
         &self,
         volume: &str,
@@ -2488,7 +2479,7 @@ impl DiskAPI for LocalDisk {
         errs
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn read_multiple(&self, req: ReadMultipleReq) -> Result<Vec<ReadMultipleResp>> {
         let mut results = Vec::new();
         let mut found = 0;
@@ -2548,7 +2539,7 @@ impl DiskAPI for LocalDisk {
         Ok(results)
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_volume(&self, volume: &str) -> Result<()> {
         let p = self.get_bucket_path(volume)?;
 
@@ -2564,7 +2555,7 @@ impl DiskAPI for LocalDisk {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn disk_info(&self, _: &DiskInfoOptions) -> Result<DiskInfo> {
         let mut info = Cache::get(self.disk_info_cache.clone()).await?;
         // TODO: nr_requests, rotational
@@ -2580,7 +2571,6 @@ impl DiskAPI for LocalDisk {
 
         Ok(info)
     }
-    #[tracing::instrument(skip(self))]
     fn start_scan(&self) -> ScanGuard {
         self.scanning.fetch_add(1, Ordering::Release);
         ScanGuard(Arc::clone(&self.scanning))

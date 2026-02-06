@@ -134,7 +134,7 @@ impl MetaCacheEntry {
         }
     }
 
-    #[tracing::instrument(level = "debug", skip(self))]
+    #[tracing::instrument(level = "trace", skip(self))]
     pub fn to_fileinfo(&self, bucket: &str) -> Result<FileInfo> {
         if self.is_dir() {
             return Ok(FileInfo {
