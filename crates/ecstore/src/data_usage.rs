@@ -403,17 +403,20 @@ pub async fn decrement_bucket_usage_memory(bucket: &str, size_decrement: u64) {
     }
 }
 
-/// Get bucket usage from in-memory cache
+/// Get bucket usage from in-memory cache.
+/// Never blocks on a backend scan; returns cached (possibly stale) value immediately.
 pub async fn get_bucket_usage_memory(bucket: &str) -> Option<u64> {
-    update_usage_cache_if_needed().await;
+    maybe_trigger_background_refresh().await;
 
     let cache = memory_cache().read().await;
     cache.get(bucket).map(|(usage, _)| *usage)
 }
 
-async fn update_usage_cache_if_needed() {
+/// Trigger a single background refresh if the cache is stale.
+/// Returns immediately without blocking the caller. At most one
+/// refresh runs at a time; concurrent callers simply return.
+async fn maybe_trigger_background_refresh() {
     let ttl = Duration::from_secs(DATA_USAGE_CACHE_TTL_SECS);
-    let double_ttl = ttl * 2;
     let now = SystemTime::now();
 
     let cache = memory_cache().read().await;
@@ -422,62 +425,42 @@ async fn update_usage_cache_if_needed() {
 
     let age = match earliest_timestamp {
         Some(ts) => now.duration_since(ts).unwrap_or_default(),
-        None => double_ttl,
+        None => ttl, // treat empty cache as expired
     };
 
     if age < ttl {
-        return;
+        return; // cache is fresh, nothing to do
     }
 
-    let mut updating = cache_updating().write().await;
-    if age < double_ttl {
-        if *updating {
-            return;
-        }
-        *updating = true;
-        drop(updating);
+    // Try to claim the refresh slot without blocking.
+    // If another task already holds the write lock or is refreshing, return.
+    let mut updating = match cache_updating().try_write() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
 
-        let cache_clone = (*memory_cache()).clone();
-        let updating_clone = (*cache_updating()).clone();
-        tokio::spawn(async move {
-            if let Some(store) = crate::global::GLOBAL_OBJECT_API.get()
-                && let Ok(data_usage_info) = load_data_usage_from_backend(store.clone()).await
-            {
-                let mut cache = cache_clone.write().await;
-                for (bucket_name, bucket_usage) in data_usage_info.buckets_usage.iter() {
-                    cache.insert(bucket_name.clone(), (bucket_usage.size, SystemTime::now()));
-                }
-            }
-            let mut updating = updating_clone.write().await;
-            *updating = false;
-        });
-        return;
-    }
-
-    for retry in 0..10 {
-        if !*updating {
-            break;
-        }
-        drop(updating);
-        let delay = Duration::from_millis(1 << retry);
-        tokio::time::sleep(delay).await;
-        updating = cache_updating().write().await;
+    if *updating {
+        return; // a refresh is already in progress
     }
 
     *updating = true;
     drop(updating);
 
-    if let Some(store) = crate::global::GLOBAL_OBJECT_API.get()
-        && let Ok(data_usage_info) = load_data_usage_from_backend(store.clone()).await
-    {
-        let mut cache = memory_cache().write().await;
-        for (bucket_name, bucket_usage) in data_usage_info.buckets_usage.iter() {
-            cache.insert(bucket_name.clone(), (bucket_usage.size, SystemTime::now()));
+    // Spawn exactly one background refresh task
+    let cache_clone = (*memory_cache()).clone();
+    let updating_clone = (*cache_updating()).clone();
+    tokio::spawn(async move {
+        if let Some(store) = crate::global::GLOBAL_OBJECT_API.get()
+            && let Ok(data_usage_info) = load_data_usage_from_backend(store.clone()).await
+        {
+            let mut cache = cache_clone.write().await;
+            for (bucket_name, bucket_usage) in data_usage_info.buckets_usage.iter() {
+                cache.insert(bucket_name.clone(), (bucket_usage.size, SystemTime::now()));
+            }
         }
-    }
-
-    let mut updating = cache_updating().write().await;
-    *updating = false;
+        let mut updating = updating_clone.write().await;
+        *updating = false;
+    });
 }
 
 /// Sync memory cache with backend data (called by scanner)
