@@ -1096,8 +1096,6 @@ impl LocalDisk {
             }
         }
 
-        entries.sort();
-
         if let Some(forward) = &forward {
             for (i, entry) in entries.iter().enumerate() {
                 if entry >= forward || forward.starts_with(entry.as_str()) {
