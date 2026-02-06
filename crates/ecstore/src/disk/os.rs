@@ -20,7 +20,6 @@ use std::{
     io,
     path::{Component, Path},
 };
-use tokio::fs;
 use tracing::warn;
 
 /// Check path length according to OS limits.
@@ -96,27 +95,36 @@ pub async fn is_empty_dir(path: impl AsRef<Path>) -> bool {
 
 // read_dir  count read limit. when count == 0 unlimit.
 /// Return file names in the directory.
+/// Uses a single blocking call to avoid per-entry spawn_blocking overhead.
 #[tracing::instrument(level = "debug", skip_all)]
 pub async fn read_dir(path: impl AsRef<Path>, count: i32) -> std::io::Result<Vec<String>> {
-    let mut entries = fs::read_dir(path.as_ref()).await?;
+    let path = path.as_ref().to_owned();
+    tokio::task::spawn_blocking(move || read_dir_sync(&path, count))
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+}
 
+fn read_dir_sync(path: &Path, mut count: i32) -> std::io::Result<Vec<String>> {
     let mut volumes = Vec::new();
 
-    let mut count = count;
-
-    while let Some(entry) = entries.next_entry().await? {
-        let name = entry.file_name().to_string_lossy().to_string();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let os_name = entry.file_name();
+        let mut name = os_name
+            .into_string()
+            .unwrap_or_else(|os| os.to_string_lossy().into_owned());
 
         if name.is_empty() || name == "." || name == ".." {
             continue;
         }
 
-        let file_type = entry.file_type().await?;
+        let file_type = entry.file_type()?;
 
         if file_type.is_file() {
             volumes.push(name);
         } else if file_type.is_dir() {
-            volumes.push(format!("{name}{SLASH_SEPARATOR}"));
+            name.push_str(SLASH_SEPARATOR);
+            volumes.push(name);
         }
         count -= 1;
         if count == 0 {
