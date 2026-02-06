@@ -40,13 +40,12 @@ impl QuotaChecker {
         let start_time = Instant::now();
         let quota_config = self.get_quota_config(bucket).await?;
 
-        // If no quota limit is set, allow operation
+        // If no quota limit is set, allow operation without computing usage
         let quota_limit = match quota_config.quota {
             None => {
-                let current_usage = self.get_real_time_usage(bucket).await?;
                 return Ok(QuotaCheckResult {
                     allowed: true,
-                    current_usage,
+                    current_usage: 0,
                     quota_limit: None,
                     operation_size,
                     remaining: None,
