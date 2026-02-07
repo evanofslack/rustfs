@@ -230,13 +230,14 @@ fn init_stdout_logging(_config: &OtelConfig, logger_level: &str, is_production: 
         .with_current_span(true)
         .with_span_list(true)
         .with_span_events(if is_production { FmtSpan::CLOSE } else { FmtSpan::FULL });
-    let console_layer = console_subscriber::spawn();
+    let console_layer = console_subscriber::ConsoleLayer::builder()
+        .server_addr(([0, 0, 0, 0], 6669))
+        .spawn();
 
     tracing_subscriber::registry()
         .with(console_layer)
-        .with(env_filter)
         .with(ErrorLayer::default())
-        .with(fmt_layer)
+        .with(fmt_layer.with_filter(env_filter))
         .init();
 
     OBSERVABILITY_METRIC_ENABLED.set(false).ok();
@@ -254,6 +255,13 @@ fn init_stdout_logging(_config: &OtelConfig, logger_level: &str, is_production: 
 /// File rolling log (size switching + number retained)
 fn init_file_logging(config: &OtelConfig, logger_level: &str, is_production: bool) -> Result<OtelGuard, TelemetryError> {
     use flexi_logger::{Age, Cleanup, Criterion, FileSpec, LogSpecification, Naming};
+
+    // Initialize tokio-console gRPC server (separate from flexi_logger)
+    let console_layer = console_subscriber::ConsoleLayer::builder()
+        .server_addr(([0, 0, 0, 0], 6669))
+        .spawn();
+    let subscriber = tracing_subscriber::registry().with(console_layer);
+    let _ = tracing::subscriber::set_global_default(subscriber);
 
     let service_name = config.service_name.as_deref().unwrap_or(APP_NAME);
     let default_log_directory = rustfs_utils::dirs::get_log_directory_to_string(ENV_OBS_LOG_DIRECTORY);
@@ -526,20 +534,22 @@ fn init_observability_http(config: &OtelConfig, logger_level: &str, is_productio
         }
     };
 
-    let filter = build_env_filter(logger_level, None);
     let otel_bridge = logger_provider
         .as_ref()
         .map(|p| OpenTelemetryTracingBridge::new(p).with_filter(build_env_filter(logger_level, None)));
     let tracer_layer = tracer_provider
         .as_ref()
-        .map(|p| OpenTelemetryLayer::new(p.tracer(service_name.to_string())));
-    let metrics_layer = meter_provider.as_ref().map(|p| MetricsLayer::new(p.clone()));
+        .map(|p| OpenTelemetryLayer::new(p.tracer(service_name.to_string())).with_filter(build_env_filter(logger_level, None)));
+    let metrics_layer = meter_provider
+        .as_ref()
+        .map(|p| MetricsLayer::new(p.clone()).with_filter(build_env_filter(logger_level, None)));
 
-    let console_layer = console_subscriber::spawn();
+    let console_layer = console_subscriber::ConsoleLayer::builder()
+        .server_addr(([0, 0, 0, 0], 6669))
+        .spawn();
 
     tracing_subscriber::registry()
         .with(console_layer)
-        .with(filter)
         .with(ErrorLayer::default())
         .with(fmt_layer_opt)
         .with(tracer_layer)
