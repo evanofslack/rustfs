@@ -29,20 +29,20 @@ require_tools aws hyperfine jq
 SKIP_SEED=false
 while [ $# -gt 0 ]; do
     case "$1" in
-        --no-seed)
-            SKIP_SEED=true
-            shift
-            ;;
-        --tiers)
-            export BENCH_TIERS="$2"
-            IFS=' ' read -r -a TIERS <<< "$BENCH_TIERS"
-            shift 2
-            ;;
-        *)
-            echo "Unknown argument: $1"
-            echo "Usage: $0 [--no-seed] [--tiers \"1000 5000\"]"
-            exit 1
-            ;;
+    --no-seed)
+        SKIP_SEED=true
+        shift
+        ;;
+    --tiers)
+        export BENCH_TIERS="$2"
+        IFS=' ' read -r -a TIERS <<<"$BENCH_TIERS"
+        shift 2
+        ;;
+    *)
+        echo "Unknown argument: $1"
+        echo "Usage: $0 [--no-seed] [--tiers \"1000 5000\"]"
+        exit 1
+        ;;
     esac
 done
 
@@ -91,7 +91,7 @@ ELAPSED=$((END_TIME - START_TIME))
 # Generate combined report.
 REPORT="$RESULTS_DIR/report.md"
 
-cat > "$REPORT" << EOF
+cat >"$REPORT" <<EOF
 # ListObjects Benchmark Report
 
 - **Date:** $(date '+%Y-%m-%d %H:%M:%S')
@@ -128,25 +128,6 @@ JSON results are in \`$RESULTS_DIR/\`:
 - \`full-list.json\`
 - \`paginated.json\`
 - \`prefix.json\`
-
-Use \`jq\` to inspect:
-\`\`\`bash
-jq '.results[] | {command: .command, mean: .mean, stddev: .stddev}' $RESULTS_DIR/full-list.json
-\`\`\`
-
-## Comparing Branches
-
-To compare results between two branches:
-
-1. Run on branch A: \`RESULTS_DIR=target/bench-a ./bench-all.sh\`
-2. Run on branch B: \`RESULTS_DIR=target/bench-b ./bench-all.sh\`
-3. Compare JSON results:
-\`\`\`bash
-# Compare mean times for full-list
-paste <(jq -r '.results[] | "\(.command)\t\(.mean)"' target/bench-a/full-list.json) \\
-      <(jq -r '.results[] | "\(.mean)"' target/bench-b/full-list.json) |
-  awk -F'\t' '{printf "%-30s  A: %.3fs  B: %.3fs  delta: %+.1f%%\n", \$1, \$2, \$3, (\$3-\$2)/\$2*100}'
-\`\`\`
 EOF
 
 log ""

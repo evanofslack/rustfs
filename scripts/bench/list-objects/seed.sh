@@ -20,6 +20,8 @@
 #   - nested: objects distributed under NESTED_PREFIX_COUNT prefixes
 #             (key = "prefix-NNN/obj-NNNNNN")
 #
+# Create all files locally, then `aws s3 sync` in one shot
+#
 # Usage:
 #   ./seed.sh              # Seed all tiers
 #   ./seed.sh 1000 5000    # Seed only specific tiers
@@ -27,7 +29,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
-require_tools aws jq
+require_tools aws
 
 check_endpoint
 
@@ -36,51 +38,58 @@ if [ $# -gt 0 ]; then
     TIERS=("$@")
 fi
 
-# Generate a small payload (1 KB) for all objects.
-PAYLOAD_FILE=$(mktemp)
+# Create a staging area for local files. Cleaned up on exit.
+STAGE_DIR=$(mktemp -d)
+trap 'rm -rf "$STAGE_DIR"' EXIT
+
+# Create a single 1 KB payload file that we hardlink everywhere.
+PAYLOAD_FILE="$STAGE_DIR/.payload"
 dd if=/dev/urandom bs=1024 count=1 of="$PAYLOAD_FILE" 2>/dev/null
-trap 'rm -f "$PAYLOAD_FILE"' EXIT
 
-# Seed a single flat bucket.
-seed_flat_bucket() {
+# Create local files for a flat layout.
+create_flat_files() {
     local count=$1
-    local bucket
-    bucket=$(bucket_name "flat" "$count")
+    local dir="$STAGE_DIR/flat-${count}"
+    mkdir -p "$dir"
 
-    # Create bucket if it doesn't exist.
-    if ! s3api head-bucket --bucket "$bucket" 2>/dev/null; then
-        log "Creating bucket: $bucket"
-        s3api create-bucket --bucket "$bucket" >/dev/null
-    fi
-
-    # Check existing object count to allow resume.
-    local existing
-    existing=$(bucket_object_count "$bucket")
-    if [ "$existing" -ge "$count" ]; then
-        log "Bucket $bucket already has $existing objects (>= $count). Skipping."
-        return
-    fi
-
-    log "Seeding $bucket with $count objects (flat layout, $SEED_PARALLELISM parallel)..."
-
-    # Use xargs for parallel upload.
-    seq 0 $((count - 1)) | xargs -P "$SEED_PARALLELISM" -I{} \
-        aws s3api --endpoint-url "$ENDPOINT" --no-cli-pager \
-        put-object --bucket "$bucket" \
-        --key "$(printf 'obj-%06d' {})" \
-        --body "$PAYLOAD_FILE" \
-        --output text --query '"."' 2>/dev/null
-
-    local final_count
-    final_count=$(bucket_object_count "$bucket")
-    log "Bucket $bucket: $final_count objects"
+    log "Creating $count local files (flat)..."
+    for i in $(seq 0 $((count - 1))); do
+        ln "$PAYLOAD_FILE" "$dir/$(printf 'obj-%06d' "$i")"
+    done
 }
 
-# Seed a single nested bucket.
-seed_nested_bucket() {
+# Create local files for a nested layout.
+create_nested_files() {
     local count=$1
+    local dir="$STAGE_DIR/nested-${count}"
+    mkdir -p "$dir"
+
+    local objects_per_prefix=$((count / NESTED_PREFIX_COUNT))
+    local remainder=$((count % NESTED_PREFIX_COUNT))
+
+    log "Creating $count local files (nested, $NESTED_PREFIX_COUNT prefixes)..."
+    for p in $(seq 0 $((NESTED_PREFIX_COUNT - 1))); do
+        local prefix_name
+        prefix_name=$(printf 'prefix-%03d' "$p")
+        mkdir -p "$dir/$prefix_name"
+
+        local this_count=$objects_per_prefix
+        if [ "$p" -lt "$remainder" ]; then
+            this_count=$((objects_per_prefix + 1))
+        fi
+        for o in $(seq 0 $((this_count - 1))); do
+            ln "$PAYLOAD_FILE" "$dir/$prefix_name/$(printf 'obj-%06d' "$o")"
+        done
+    done
+}
+
+# Sync a local directory to an S3 bucket.
+sync_to_bucket() {
+    local layout=$1
+    local count=$2
+    local dir="$STAGE_DIR/${layout}-${count}"
     local bucket
-    bucket=$(bucket_name "nested" "$count")
+    bucket=$(bucket_name "$layout" "$count")
 
     # Create bucket if it doesn't exist.
     if ! s3api head-bucket --bucket "$bucket" 2>/dev/null; then
@@ -88,51 +97,27 @@ seed_nested_bucket() {
         s3api create-bucket --bucket "$bucket" >/dev/null
     fi
 
-    # Check existing object count.
-    local existing
-    existing=$(bucket_object_count "$bucket")
-    if [ "$existing" -ge "$count" ]; then
-        log "Bucket $bucket already has $existing objects (>= $count). Skipping."
-        return
-    fi
-
-    log "Seeding $bucket with $count objects (nested under $NESTED_PREFIX_COUNT prefixes, $SEED_PARALLELISM parallel)..."
-
-    local objects_per_prefix=$(( count / NESTED_PREFIX_COUNT ))
-    local remainder=$(( count % NESTED_PREFIX_COUNT ))
-
-    # Generate all keys and upload in parallel.
-    {
-        for p in $(seq 0 $((NESTED_PREFIX_COUNT - 1))); do
-            local prefix_name
-            prefix_name=$(printf 'prefix-%03d' "$p")
-            local this_count=$objects_per_prefix
-            if [ "$p" -lt "$remainder" ]; then
-                this_count=$((objects_per_prefix + 1))
-            fi
-            for o in $(seq 0 $((this_count - 1))); do
-                printf '%s/obj-%06d\n' "$prefix_name" "$o"
-            done
-        done
-    } | xargs -P "$SEED_PARALLELISM" -I{} \
-        aws s3api --endpoint-url "$ENDPOINT" --no-cli-pager \
-        put-object --bucket "$bucket" \
-        --key "{}" \
-        --body "$PAYLOAD_FILE" \
-        --output text --query '"."' 2>/dev/null
-
-    local final_count
-    final_count=$(bucket_object_count "$bucket")
-    log "Bucket $bucket: $final_count objects"
+    log "Syncing $count objects to s3://$bucket/ ..."
+    s3 sync "$dir/" "s3://$bucket/" --quiet
+    log "Done: $bucket"
 }
 
 # Main: seed all tiers.
-log "Seeding benchmarks buckets (tiers: ${TIERS[*]})"
+log "Seeding benchmark buckets (tiers: ${TIERS[*]})"
+
 for tier in "${TIERS[@]}"; do
-    seed_flat_bucket "$tier"
-    seed_nested_bucket "$tier"
+    # Create local files for both layouts.
+    create_flat_files "$tier"
+    create_nested_files "$tier"
+
+    # Sync both to S3.
+    sync_to_bucket "flat" "$tier"
+    sync_to_bucket "nested" "$tier"
+
+    # Free disk space: remove staged files for this tier.
+    rm -rf "$STAGE_DIR/flat-${tier}" "$STAGE_DIR/nested-${tier}"
 done
 
 log "Seeding complete."
-log "Buckets created:"
+log "Buckets:"
 s3api list-buckets --query 'Buckets[?starts_with(Name, `bench-list`)].Name' --output text | tr '\t' '\n' | sort

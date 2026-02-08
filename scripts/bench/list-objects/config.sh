@@ -21,9 +21,10 @@ set -euo pipefail
 DefaultAccessKey=rustfsadmin
 DefaultSecretKey=rustfsadmin
 DefaultRegion=us-east-1
-DefaultEndpoint=http://localhost:9000
+# DefaultEndpoint=http://localhost:9000
+DefaultEndpoint=http://10.33.1.166:9000
 
-DefaultObjectsTiers="100 1000 5000 10000 50000"
+DefaultObjectsTiers="100 1000 5000 10000"
 DefaultNestedPrefixes=100
 
 DefaultHyperfineRuns=10
@@ -47,7 +48,7 @@ IFS=' ' read -r -a TIERS <<<"${BENCH_TIERS:-$DefaultObjectsTiers}"
 NESTED_PREFIX_COUNT="${BENCH_NESTED_PREFIXES:-$DefaultNestedPrefixes}"
 
 # Bucket name prefix (avoids collision with real data).
-BUCKET_PREFIX="bench-list"
+BUCKET_PREFIX="rustfs-bench-list"
 
 # Hyperfine parameters.
 HYPERFINE_RUNS="${HYPERFINE_RUNS:-$DefaultHyperfineRuns}"
@@ -113,15 +114,9 @@ bucket_name() {
     echo "${BUCKET_PREFIX}-${layout}-${count}"
 }
 
-# Count objects in a bucket.
+# Count objects in a bucket (handles pagination).
 bucket_object_count() {
     local bucket=$1
-    # list-objects-v2 with no args returns KeyCount.
-    local count
-    count=$(s3api list-objects-v2 --bucket "$bucket" --query 'KeyCount' --output text 2>/dev/null || echo "0")
-    if [ "$count" = "None" ] || [ -z "$count" ]; then
-        echo "0"
-    else
-        echo "$count"
-    fi
+    s3 ls "s3://$bucket/" --recursive --summarize 2>/dev/null |
+        awk '/Total Objects:/{print $3}'
 }
