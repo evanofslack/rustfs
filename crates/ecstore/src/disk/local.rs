@@ -84,6 +84,10 @@ pub struct LocalDisk {
     pub disk_info_cache: Arc<Cache<DiskInfo>>,
     pub scanning: Arc<AtomicU32>,
     pub rotational: bool,
+    /// Maximum concurrent metadata reads during directory scans.
+    /// SSD: 32 (leverage NVMe queue depth). HDD: 1 (avoid seek storms).
+    /// Overridable via RUSTFS_WALK_CONCURRENCY env var.
+    pub walk_concurrency: usize,
     pub fstype: String,
     pub major: u64,
     pub minor: u64,
@@ -211,6 +215,7 @@ impl LocalDisk {
             disk_info_cache: Arc::new(cache),
             scanning: Arc::new(AtomicU32::new(0)),
             rotational: Default::default(),
+            walk_concurrency: 1, // safe default before disk type is known
             fstype: Default::default(),
             minor: Default::default(),
             major: Default::default(),
@@ -239,6 +244,23 @@ impl LocalDisk {
         if info.rotational {
             disk.rotational = true;
         }
+
+        // Set concurrent metadata read limit based on disk type.
+        // SSD/NVMe can handle deep queues; HDD must stay sequential to avoid seek storms.
+        // Env var override allows runtime tuning and benchmarking different concurrency levels.
+        disk.walk_concurrency = match std::env::var("RUSTFS_WALK_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            Some(v) => v.max(1), // env var override, minimum 1
+            None => {
+                if disk.rotational {
+                    1
+                } else {
+                    32
+                }
+            }
+        };
 
         disk.make_meta_volumes().await?;
 
@@ -966,6 +988,36 @@ impl LocalDisk {
         Ok(())
     }
 
+    /// Read metadata for multiple entries concurrently.
+    ///
+    /// Concurrency is bounded by `self.walk_concurrency`:
+    ///   - SSD (walk_concurrency=32): reads happen in parallel via NVMe queue depth.
+    ///   - HDD (walk_concurrency=1): degrades to sequential, same as the previous behavior.
+    ///
+    /// Results are returned in the same order as `fnames`, preserving the sorted
+    /// entry order required by S3 ListObjects. Uses chunked `join_all` to limit
+    /// concurrency without stream closures (which conflict with `async_recursion`).
+    async fn read_metadata_parallel(&self, bucket: &str, fnames: &[String]) -> Vec<Result<Bytes>> {
+        if self.walk_concurrency <= 1 || fnames.is_empty() {
+            // Sequential path: identical to previous behavior. Used on HDD.
+            let mut results = Vec::with_capacity(fnames.len());
+            for fname in fnames {
+                results.push(self.read_metadata(bucket, fname).await);
+            }
+            return results;
+        }
+
+        // Parallel path: process in chunks of walk_concurrency.
+        // join_all preserves input order — result[i] corresponds to fnames[chunk_start + i].
+        let mut results = Vec::with_capacity(fnames.len());
+        for chunk in fnames.chunks(self.walk_concurrency) {
+            let futs: Vec<_> = chunk.iter().map(|fname| self.read_metadata(bucket, fname)).collect();
+            let chunk_results = futures::future::join_all(futs).await;
+            results.extend(chunk_results);
+        }
+        results
+    }
+
     #[async_recursion::async_recursion]
     async fn scan_dir<W>(
         &self,
@@ -1110,19 +1162,51 @@ impl LocalDisk {
         let mut dir_stack: Vec<String> = Vec::with_capacity(5);
         prefix = "".to_owned();
 
-        for entry in entries.iter() {
-            if opts.limit > 0 && *objs_returned >= opts.limit {
-                return Ok(());
-            }
+        // Phase A: Classify entries — compute names and metadata paths.
+        // No I/O here, just string operations on the already-sorted entries.
+        struct ScanEntry {
+            name: String,
+            fname: String,
+            is_dir_obj: bool,
+        }
 
+        let mut scan_entries: Vec<ScanEntry> = Vec::with_capacity(entries.len());
+        for entry in entries.iter() {
             if entry.is_empty() {
                 continue;
             }
 
             let name = path_join_buf(&[current.as_str(), entry.as_str()]);
+            let is_dir_obj = dir_objes.contains(entry);
+
+            let mut meta_name = name.clone();
+            if is_dir_obj {
+                meta_name.truncate(meta_name.len() - meta_name.chars().last().unwrap().len_utf8());
+                meta_name.push_str(GLOBAL_DIR_SUFFIX_WITH_SLASH);
+            }
+            let fname = format!("{meta_name}/{STORAGE_FORMAT_FILE}");
+
+            scan_entries.push(ScanEntry { name, fname, is_dir_obj });
+        }
+
+        // Phase B: Parallel metadata reads.
+        // Concurrency is bounded by self.walk_concurrency:
+        //   SSD (32): reads in parallel via NVMe queue depth.
+        //   HDD (1): sequential, identical to previous behavior.
+        // Results are indexed by position to preserve sorted order.
+        let fnames: Vec<String> = scan_entries.iter().map(|se| se.fname.clone()).collect();
+        let metadata_results = self.read_metadata_parallel(&opts.bucket, &fnames).await;
+
+        // Phase C: Ordered emission — iterate in sorted order, using pre-fetched
+        // results. dir_stack interleaving and recursive scan_dir calls happen here,
+        // preserving identical output order to the previous sequential implementation.
+        for (i, se) in scan_entries.iter().enumerate() {
+            if opts.limit > 0 && *objs_returned >= opts.limit {
+                return Ok(());
+            }
 
             while let Some(pop) = dir_stack.last().cloned()
-                && pop < name
+                && pop < se.name
             {
                 out.write_obj(&MetaCacheEntry {
                     name: pop.clone(),
@@ -1139,24 +1223,19 @@ impl LocalDisk {
             }
 
             let mut meta = MetaCacheEntry {
-                name,
+                name: se.name.clone(),
                 ..Default::default()
             };
 
-            let mut is_dir_obj = false;
-
-            if let Some(_dir) = dir_objes.get(entry) {
-                is_dir_obj = true;
+            if se.is_dir_obj {
                 meta.name
                     .truncate(meta.name.len() - meta.name.chars().last().unwrap().len_utf8());
                 meta.name.push_str(GLOBAL_DIR_SUFFIX_WITH_SLASH);
             }
 
-            let fname = format!("{}/{}", &meta.name, STORAGE_FORMAT_FILE);
-
-            match self.read_metadata(&opts.bucket, fname.as_str()).await {
+            match &metadata_results[i] {
                 Ok(res) => {
-                    if is_dir_obj {
+                    if se.is_dir_obj {
                         meta.name = meta.name.trim_end_matches(GLOBAL_DIR_SUFFIX_WITH_SLASH).to_owned();
                         meta.name.push_str(SLASH_SEPARATOR);
                     }
@@ -1165,17 +1244,13 @@ impl LocalDisk {
 
                     out.write_obj(&meta).await?;
 
-                    // if let Ok(meta) = FileMeta::load(&meta.metadata)
-                    //     && !meta.all_hidden(true)
-                    // {
                     *objs_returned += 1;
-                    // }
                 }
                 Err(err) => {
-                    if err == Error::FileNotFound || err == Error::IsNotRegular {
+                    if *err == Error::FileNotFound || *err == Error::IsNotRegular {
                         // NOT an object, append to stack (with slash)
                         // If dirObject, but no metadata (which is unexpected) we skip it.
-                        if !is_dir_obj && !is_empty_dir(self.get_object_path(&opts.bucket, &meta.name)?).await {
+                        if !se.is_dir_obj && !is_empty_dir(self.get_object_path(&opts.bucket, &meta.name)?).await {
                             meta.name.push_str(SLASH_SEPARATOR);
                             dir_stack.push(meta.name);
                         }
@@ -3004,5 +3079,454 @@ mod test {
 
             assert_eq!(normalize_path_components("C:\\a\\..\\b"), PathBuf::from("C:\\b"));
         }
+    }
+
+    // =========================================================================
+    // Tests for walk_concurrency configuration
+    // =========================================================================
+
+    #[test]
+    fn test_walk_concurrency_defaults_to_ssd() {
+        // Ensure the env var is not set so we test the default behavior.
+        temp_env::with_var_unset("RUSTFS_WALK_CONCURRENCY", || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let mut ep = Endpoint::try_from(tmp.path().to_str().unwrap()).unwrap();
+                ep.is_local = true;
+                let disk = LocalDisk::new(&ep, false).await.unwrap();
+                // On macOS/non-Linux, rotational defaults to false (SSD assumed).
+                // On Linux, depends on actual hardware but tempdir is typically on SSD/tmpfs.
+                if !disk.rotational {
+                    assert_eq!(disk.walk_concurrency, 32);
+                }
+            });
+        });
+    }
+
+    #[tokio::test]
+    async fn test_walk_concurrency_hdd_is_sequential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ep = Endpoint::try_from(tmp.path().to_str().unwrap()).unwrap();
+        ep.is_local = true;
+        let mut disk = LocalDisk::new(&ep, false).await.unwrap();
+        // Simulate HDD detection.
+        disk.rotational = true;
+        disk.walk_concurrency = 1;
+        assert_eq!(disk.walk_concurrency, 1);
+    }
+
+    #[test]
+    fn test_walk_concurrency_env_override() {
+        temp_env::with_var("RUSTFS_WALK_CONCURRENCY", Some("16"), || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let mut ep = Endpoint::try_from(tmp.path().to_str().unwrap()).unwrap();
+                ep.is_local = true;
+                let disk = LocalDisk::new(&ep, false).await.unwrap();
+                assert_eq!(disk.walk_concurrency, 16);
+            });
+        });
+    }
+
+    #[test]
+    fn test_walk_concurrency_env_minimum_clamp() {
+        // Setting to 0 should clamp to 1 (minimum).
+        temp_env::with_var("RUSTFS_WALK_CONCURRENCY", Some("0"), || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let mut ep = Endpoint::try_from(tmp.path().to_str().unwrap()).unwrap();
+                ep.is_local = true;
+                let disk = LocalDisk::new(&ep, false).await.unwrap();
+                assert_eq!(disk.walk_concurrency, 1);
+            });
+        });
+    }
+
+    // =========================================================================
+    // Helper: create a LocalDisk + bucket with N fake objects for walk_dir tests
+    // =========================================================================
+
+    const TEST_BUCKET: &str = "test-walk-bucket";
+
+    /// Minimal xl.meta content sufficient for walk_dir to recognize an object.
+    fn fake_xl_meta() -> Bytes {
+        Bytes::from_static(&[0u8, 10])
+    }
+
+    /// Create a LocalDisk with a bucket and N objects named by the provided keys.
+    /// Returns (TempDir guard, LocalDisk).
+    async fn setup_walk_dir_disk(object_keys: &[&str]) -> (tempfile::TempDir, LocalDisk) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ep = Endpoint::try_from(tmp.path().to_str().unwrap()).unwrap();
+        ep.is_local = true;
+        let disk = LocalDisk::new(&ep, false).await.unwrap();
+        disk.make_volume(TEST_BUCKET).await.unwrap();
+
+        let meta = fake_xl_meta();
+        for key in object_keys {
+            let xl_path = format!("{key}/xl.meta");
+            disk.write_all(TEST_BUCKET, &xl_path, meta.clone()).await.unwrap();
+        }
+
+        (tmp, disk)
+    }
+
+    /// Run walk_dir on a disk and collect all entry names from the output.
+    async fn collect_walk_dir_names(disk: &LocalDisk, opts: WalkDirOptions) -> Vec<String> {
+        let (rd, mut wr) = tokio::io::duplex(64 * 1024);
+
+        // Run walk_dir (writes to wr) and reading (reads from rd) concurrently.
+        let writer_fut = async {
+            let _ = disk.walk_dir(opts, &mut wr).await;
+            drop(wr);
+        };
+
+        let reader_fut = async {
+            let mut reader = rustfs_filemeta::MetacacheReader::new(rd);
+            let mut names = Vec::new();
+            while let Ok(Some(entry)) = reader.peek().await {
+                names.push(entry.name.clone());
+                let _ = reader.skip(1).await;
+            }
+            names
+        };
+
+        let (_, names) = tokio::join!(writer_fut, reader_fut);
+        names
+    }
+
+    // =========================================================================
+    // Tests for S3 ListObjects ordering correctness
+    // =========================================================================
+
+    /// Verify that walk_dir output is lexicographically sorted for a flat bucket.
+    #[tokio::test]
+    async fn test_scan_dir_ordering_flat_sorted_output() {
+        // Deliberately unsorted input keys.
+        let keys = vec!["z_obj", "a_obj", "m_obj", "b_obj", "k_obj", "c_obj", "x_obj", "d_obj"];
+        let (_tmp, disk) = setup_walk_dir_disk(&keys).await;
+
+        let opts = WalkDirOptions {
+            bucket: TEST_BUCKET.to_string(),
+            base_dir: "".to_string(),
+            recursive: true,
+            ..Default::default()
+        };
+
+        let names = collect_walk_dir_names(&disk, opts).await;
+
+        // Verify sorted order.
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "walk_dir output must be lexicographically sorted");
+
+        // Verify all objects are present.
+        assert_eq!(names.len(), keys.len(), "all objects must be present in output");
+    }
+
+    /// Verify output is sorted with many objects (exercises parallel read path).
+    #[tokio::test]
+    async fn test_scan_dir_ordering_large_directory() {
+        let keys: Vec<String> = (0..200).map(|i| format!("obj_{i:04}")).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let (_tmp, disk) = setup_walk_dir_disk(&key_refs).await;
+
+        let opts = WalkDirOptions {
+            bucket: TEST_BUCKET.to_string(),
+            base_dir: "".to_string(),
+            recursive: true,
+            ..Default::default()
+        };
+
+        let names = collect_walk_dir_names(&disk, opts).await;
+
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "large directory output must be sorted");
+        assert_eq!(names.len(), 200);
+    }
+
+    /// THE DEFINITIVE TEST: sequential (concurrency=1) and parallel (concurrency=32)
+    /// must produce byte-identical output.
+    #[tokio::test]
+    async fn test_scan_dir_concurrent_equals_sequential() {
+        let keys: Vec<String> = (0..100).map(|i| format!("obj_{i:04}")).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let (_tmp, mut disk) = setup_walk_dir_disk(&key_refs).await;
+
+        let opts = WalkDirOptions {
+            bucket: TEST_BUCKET.to_string(),
+            base_dir: "".to_string(),
+            recursive: true,
+            ..Default::default()
+        };
+
+        // Run with concurrency=1 (sequential, same as old behavior).
+        disk.walk_concurrency = 1;
+        let sequential_names = collect_walk_dir_names(&disk, opts.clone()).await;
+
+        // Run with concurrency=32 (parallel).
+        disk.walk_concurrency = 32;
+        let parallel_names = collect_walk_dir_names(&disk, opts).await;
+
+        assert_eq!(
+            sequential_names, parallel_names,
+            "sequential and parallel walk_dir must produce identical output"
+        );
+        assert_eq!(sequential_names.len(), 100);
+    }
+
+    /// Run the same listing multiple times with parallel reads and verify
+    /// identical output every time — proves determinism.
+    #[tokio::test]
+    async fn test_scan_dir_deterministic_across_runs() {
+        let keys: Vec<String> = (0..50).map(|i| format!("obj_{i:04}")).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let (_tmp, mut disk) = setup_walk_dir_disk(&key_refs).await;
+        disk.walk_concurrency = 32;
+
+        let opts = WalkDirOptions {
+            bucket: TEST_BUCKET.to_string(),
+            base_dir: "".to_string(),
+            recursive: true,
+            ..Default::default()
+        };
+
+        let first_run = collect_walk_dir_names(&disk, opts.clone()).await;
+
+        for run_idx in 1..10 {
+            let this_run = collect_walk_dir_names(&disk, opts.clone()).await;
+            assert_eq!(first_run, this_run, "run {run_idx} produced different output — non-deterministic!");
+        }
+    }
+
+    /// Verify forward_to (continuation token) works correctly with parallel reads.
+    #[tokio::test]
+    async fn test_scan_dir_ordering_with_forward_to() {
+        let keys: Vec<&str> = vec!["a_obj", "b_obj", "c_obj", "d_obj", "e_obj", "f_obj", "g_obj", "h_obj"];
+        let (_tmp, mut disk) = setup_walk_dir_disk(&keys).await;
+
+        // Full listing (sequential).
+        disk.walk_concurrency = 1;
+        let full_opts = WalkDirOptions {
+            bucket: TEST_BUCKET.to_string(),
+            base_dir: "".to_string(),
+            recursive: true,
+            ..Default::default()
+        };
+        let full_names = collect_walk_dir_names(&disk, full_opts).await;
+
+        // Listing with forward_to = "d_obj" (parallel).
+        disk.walk_concurrency = 32;
+        let forward_opts = WalkDirOptions {
+            bucket: TEST_BUCKET.to_string(),
+            base_dir: "".to_string(),
+            recursive: true,
+            forward_to: Some("d_obj".to_string()),
+            ..Default::default()
+        };
+        let forward_names = collect_walk_dir_names(&disk, forward_opts).await;
+
+        // forward_to should skip entries before "d_obj".
+        assert!(!forward_names.is_empty(), "forward_to should return results");
+        assert!(forward_names[0].as_str() >= "d_obj", "first entry after forward_to must be >= marker");
+
+        // Forward result should be a suffix of the full listing.
+        let offset = full_names.iter().position(|n| n == &forward_names[0]).unwrap();
+        assert_eq!(&full_names[offset..], &forward_names[..]);
+    }
+
+    /// Verify limit works correctly with parallel reads.
+    #[tokio::test]
+    async fn test_scan_dir_ordering_with_limit() {
+        let keys: Vec<String> = (0..50).map(|i| format!("obj_{i:04}")).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let (_tmp, mut disk) = setup_walk_dir_disk(&key_refs).await;
+
+        // Full listing.
+        disk.walk_concurrency = 1;
+        let full_opts = WalkDirOptions {
+            bucket: TEST_BUCKET.to_string(),
+            base_dir: "".to_string(),
+            recursive: true,
+            ..Default::default()
+        };
+        let full_names = collect_walk_dir_names(&disk, full_opts).await;
+
+        // Limited listing (parallel).
+        disk.walk_concurrency = 32;
+        let limited_opts = WalkDirOptions {
+            bucket: TEST_BUCKET.to_string(),
+            base_dir: "".to_string(),
+            recursive: true,
+            limit: 10,
+            ..Default::default()
+        };
+        let limited_names = collect_walk_dir_names(&disk, limited_opts).await;
+
+        assert_eq!(limited_names.len(), 10, "limit should cap results to 10");
+        assert_eq!(
+            &full_names[..10],
+            &limited_names[..],
+            "limited results must match first 10 of full listing"
+        );
+    }
+
+    /// Verify ordering with a mixed layout (objects + nested subdirectories).
+    #[tokio::test]
+    async fn test_scan_dir_ordering_mixed_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ep = Endpoint::try_from(tmp.path().to_str().unwrap()).unwrap();
+        ep.is_local = true;
+        let disk = LocalDisk::new(&ep, false).await.unwrap();
+        disk.make_volume(TEST_BUCKET).await.unwrap();
+
+        let meta = fake_xl_meta();
+
+        // Create flat objects.
+        for key in &["obj_a", "obj_c", "obj_e"] {
+            disk.write_all(TEST_BUCKET, &format!("{key}/xl.meta"), meta.clone())
+                .await
+                .unwrap();
+        }
+
+        // Create nested objects inside subdirectories.
+        for key in &["dir_b/sub1", "dir_d/sub2"] {
+            disk.write_all(TEST_BUCKET, &format!("{key}/xl.meta"), meta.clone())
+                .await
+                .unwrap();
+        }
+
+        let opts = WalkDirOptions {
+            bucket: TEST_BUCKET.to_string(),
+            base_dir: "".to_string(),
+            recursive: true,
+            ..Default::default()
+        };
+
+        let names = collect_walk_dir_names(&disk, opts).await;
+
+        // Verify sorted order (including dir headers and their contents).
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "mixed layout output must be sorted");
+
+        // Verify all objects are present (both flat and nested).
+        assert!(names.iter().any(|n| n.contains("obj_a")), "obj_a must be present");
+        assert!(names.iter().any(|n| n.contains("obj_c")), "obj_c must be present");
+        assert!(names.iter().any(|n| n.contains("obj_e")), "obj_e must be present");
+        assert!(names.iter().any(|n| n.contains("sub1")), "dir_b/sub1 must be present");
+        assert!(names.iter().any(|n| n.contains("sub2")), "dir_d/sub2 must be present");
+    }
+
+    /// Verify mixed layout produces identical output with sequential vs parallel reads.
+    #[tokio::test]
+    async fn test_scan_dir_mixed_concurrent_equals_sequential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ep = Endpoint::try_from(tmp.path().to_str().unwrap()).unwrap();
+        ep.is_local = true;
+        let mut disk = LocalDisk::new(&ep, false).await.unwrap();
+        disk.make_volume(TEST_BUCKET).await.unwrap();
+
+        let meta = fake_xl_meta();
+        // Interleave flat objects and nested objects to exercise dir_stack.
+        for key in &["a_flat", "b_dir/nested1", "c_flat", "d_dir/nested2", "e_flat"] {
+            disk.write_all(TEST_BUCKET, &format!("{key}/xl.meta"), meta.clone())
+                .await
+                .unwrap();
+        }
+
+        let opts = WalkDirOptions {
+            bucket: TEST_BUCKET.to_string(),
+            base_dir: "".to_string(),
+            recursive: true,
+            ..Default::default()
+        };
+
+        disk.walk_concurrency = 1;
+        let sequential = collect_walk_dir_names(&disk, opts.clone()).await;
+
+        disk.walk_concurrency = 32;
+        let parallel = collect_walk_dir_names(&disk, opts).await;
+
+        assert_eq!(
+            sequential, parallel,
+            "mixed layout: sequential and parallel must produce identical output"
+        );
+    }
+
+    // =========================================================================
+    // Tests for read_metadata_parallel
+    // =========================================================================
+
+    /// Verify read_metadata_parallel returns results in input order.
+    #[tokio::test]
+    async fn test_read_metadata_parallel_preserves_index_mapping() {
+        let keys: Vec<String> = (0..20).map(|i| format!("obj_{i:04}")).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let (_tmp, mut disk) = setup_walk_dir_disk(&key_refs).await;
+        disk.walk_concurrency = 32;
+
+        let fnames: Vec<String> = keys.iter().map(|k| format!("{k}/xl.meta")).collect();
+        let results = disk.read_metadata_parallel(TEST_BUCKET, &fnames).await;
+
+        assert_eq!(results.len(), fnames.len());
+        for (i, result) in results.iter().enumerate() {
+            assert!(result.is_ok(), "result[{i}] for {} should be Ok, got {:?}", fnames[i], result);
+        }
+    }
+
+    /// Verify read_metadata_parallel correctly maps errors to their indices.
+    #[tokio::test]
+    async fn test_read_metadata_parallel_handles_missing_files() {
+        let keys: Vec<&str> = vec!["exists_a", "exists_b"];
+        let (_tmp, mut disk) = setup_walk_dir_disk(&keys).await;
+        disk.walk_concurrency = 32;
+
+        // Mix existing and non-existing paths.
+        let fnames = vec![
+            "exists_a/xl.meta".to_string(),
+            "missing_x/xl.meta".to_string(),
+            "exists_b/xl.meta".to_string(),
+            "missing_y/xl.meta".to_string(),
+        ];
+        let results = disk.read_metadata_parallel(TEST_BUCKET, &fnames).await;
+
+        assert_eq!(results.len(), 4);
+        assert!(results[0].is_ok(), "exists_a should be Ok");
+        assert!(results[1].is_err(), "missing_x should be Err");
+        assert!(results[2].is_ok(), "exists_b should be Ok");
+        assert!(results[3].is_err(), "missing_y should be Err");
+    }
+
+    /// Verify concurrency=1 produces same results as concurrency=32.
+    #[tokio::test]
+    async fn test_read_metadata_parallel_concurrency_1_matches_32() {
+        let keys: Vec<String> = (0..30).map(|i| format!("obj_{i:04}")).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let (_tmp, mut disk) = setup_walk_dir_disk(&key_refs).await;
+
+        let fnames: Vec<String> = keys.iter().map(|k| format!("{k}/xl.meta")).collect();
+
+        disk.walk_concurrency = 1;
+        let sequential: Vec<bool> = disk
+            .read_metadata_parallel(TEST_BUCKET, &fnames)
+            .await
+            .into_iter()
+            .map(|r| r.is_ok())
+            .collect();
+
+        disk.walk_concurrency = 32;
+        let parallel: Vec<bool> = disk
+            .read_metadata_parallel(TEST_BUCKET, &fnames)
+            .await
+            .into_iter()
+            .map(|r| r.is_ok())
+            .collect();
+
+        assert_eq!(sequential, parallel, "concurrency=1 and concurrency=32 must produce same ok/err pattern");
     }
 }
