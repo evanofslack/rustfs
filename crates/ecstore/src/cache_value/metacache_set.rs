@@ -64,22 +64,22 @@ impl Clone for ListPathRawOptions {
     }
 }
 
+#[tracing::instrument(
+    skip(rx, opts),
+    fields(
+        disks = ?opts.disks,
+        disks_count = opts.disks.len(),
+        bucket = ?opts.bucket,
+        path = ?opts.path,
+        recursive = opts.recursive,
+    ),
+    level = "info"
+)]
 pub async fn list_path_raw(rx: CancellationToken, opts: ListPathRawOptions) -> disk::error::Result<()> {
-    let backtrace = std::backtrace::Backtrace::capture();
-
-    // Log entry with caller context
-    warn!(
-        target: "rustfs::list_path_analysis",
-        opts = ?opts.disks,
-        "Enter list_path_raw"
-    );
-
-    // Log the backtrace at debug level
-    debug!(
-        target: "rustfs::list_path_analysis",
-        backtrace = %backtrace,
-        "Full call stack for list_path_raw"
-    );
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let bt = std::backtrace::Backtrace::force_capture();
+        tracing::debug!(backtrace = %bt, "list_path_raw call stack");
+    }
 
     if opts.disks.is_empty() {
         return Err(DiskError::other("list_path_raw: 0 drives provided"));
