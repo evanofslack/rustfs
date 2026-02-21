@@ -19,7 +19,7 @@ use rustfs_filemeta::{MetaCacheEntries, MetaCacheEntry, MetacacheReader, is_io_e
 use std::{future::Future, pin::Pin};
 use tokio::spawn;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub type AgreedFn = Box<dyn Fn(MetaCacheEntry) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static>;
 pub type PartialFn =
@@ -65,6 +65,22 @@ impl Clone for ListPathRawOptions {
 }
 
 pub async fn list_path_raw(rx: CancellationToken, opts: ListPathRawOptions) -> disk::error::Result<()> {
+    let backtrace = std::backtrace::Backtrace::capture();
+
+    // Log entry with caller context
+    warn!(
+        target: "rustfs::list_path_analysis",
+        opts = ?opts.disks,
+        "Enter list_path_raw"
+    );
+
+    // Log the backtrace at debug level
+    debug!(
+        target: "rustfs::list_path_analysis",
+        backtrace = %backtrace,
+        "Full call stack for list_path_raw"
+    );
+
     if opts.disks.is_empty() {
         return Err(DiskError::other("list_path_raw: 0 drives provided"));
     }
