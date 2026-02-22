@@ -19,7 +19,7 @@ use rustfs_filemeta::{MetaCacheEntries, MetaCacheEntry, MetacacheReader, is_io_e
 use std::{future::Future, pin::Pin};
 use tokio::spawn;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 pub type AgreedFn = Box<dyn Fn(MetaCacheEntry) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static>;
 pub type PartialFn =
