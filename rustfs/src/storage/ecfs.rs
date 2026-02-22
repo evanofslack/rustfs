@@ -3647,7 +3647,13 @@ impl S3 for FS {
 
     #[instrument(level = "debug", skip(self, req))]
     async fn list_objects_v2(&self, req: S3Request<ListObjectsV2Input>) -> S3Result<S3Response<ListObjectsV2Output>> {
-        // warn!("list_objects_v2 req {:?}", &req.input);
+        debug!(
+            user_agent = ?req.headers.get(hyper::header::USER_AGENT),
+            remote_addr = ?req.extensions.get::<std::net::SocketAddr>(),
+            method = ?req.method,
+            uri = %req.uri,
+            "incoming request list_objects_v2"
+        );
         let ListObjectsV2Input {
             bucket,
             continuation_token,
