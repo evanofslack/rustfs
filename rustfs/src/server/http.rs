@@ -663,7 +663,7 @@ fn process_connection(
                     })
                     .on_request(|request: &HttpRequest<_>, span: &Span| {
                         let _enter = span.enter();
-                        warn!(
+                        info!(
                             method = ?request.method(),
                             path = ?request.uri().path(),
                             headers = ?request.headers(),

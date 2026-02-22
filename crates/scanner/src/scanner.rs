@@ -182,6 +182,7 @@ pub async fn run_data_scanner(ctx: CancellationToken, storeapi: Arc<ECStore>) ->
         if ctx.is_cancelled() {
             break;
         }
+        warn!("start run data scanner");
 
         cycle_info.current = cycle_info.next;
         cycle_info.started = Utc::now();
@@ -271,6 +272,7 @@ pub async fn store_data_usage_in_backend(
     storeapi: Arc<ECStore>,
     mut receiver: mpsc::Receiver<DataUsageInfo>,
 ) {
+    warn!("store_data_useage_in_backend");
     let mut attempts = 1u32;
 
     while let Some(data_usage_info) = receiver.recv().await {
