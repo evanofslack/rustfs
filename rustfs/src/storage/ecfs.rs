@@ -3630,6 +3630,13 @@ impl S3 for FS {
 
     #[instrument(level = "debug", skip(self, req))]
     async fn list_objects(&self, req: S3Request<ListObjectsInput>) -> S3Result<S3Response<ListObjectsOutput>> {
+        debug!(
+            user_agent = ?req.headers.get(hyper::header::USER_AGENT),
+            remote_addr = ?req.extensions.get::<std::net::SocketAddr>(),
+            method = ?req.method,
+            uri = %req.uri,
+            "incoming request list_objects_v1"
+        );
         // Capture the original marker from the request before conversion
         // S3 API requires the marker field to be echoed back in the response
         let request_marker = req.input.marker.clone();
