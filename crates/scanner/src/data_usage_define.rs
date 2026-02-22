@@ -34,7 +34,7 @@ use rustfs_ecstore::{
 };
 use rustfs_utils::path::{SLASH_SEPARATOR, path_join_buf};
 use tokio::time::{Duration, sleep, timeout};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 // Data usage constants
 pub const DATA_USAGE_ROOT: &str = SLASH_SEPARATOR;
@@ -310,7 +310,7 @@ impl DataUsageHash {
 
         let hash = self.calculate_hash();
 
-        warn!(
+        debug!(
             "mod_alt: key: {} hash: {} cycle: {} cycles: {} mod: {} hash >> 32: {} result: {}",
             self.0,
             hash,
