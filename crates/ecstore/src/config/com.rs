@@ -46,6 +46,7 @@ pub async fn read_config_with_metadata<S: StorageAPI>(
     file: &str,
     opts: &ObjectOptions,
 ) -> Result<(Vec<u8>, ObjectInfo)> {
+    warn!(file = file, "read_config_with_metadata");
     let h = HeaderMap::new();
     let mut rd = api
         .get_object_reader(RUSTFS_META_BUCKET, file, None, h, opts)
@@ -106,6 +107,7 @@ pub async fn delete_config<S: StorageAPI>(api: Arc<S>, file: &str) -> Result<()>
 }
 
 pub async fn save_config_with_opts<S: StorageAPI>(api: Arc<S>, file: &str, data: Vec<u8>, opts: &ObjectOptions) -> Result<()> {
+    warn!(file = file, "save_config_with_opts");
     if let Err(err) = api
         .put_object(RUSTFS_META_BUCKET, file, &mut PutObjReader::from_vec(data), opts)
         .await
