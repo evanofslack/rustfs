@@ -182,7 +182,7 @@ pub async fn run_data_scanner(ctx: CancellationToken, storeapi: Arc<ECStore>) ->
         if ctx.is_cancelled() {
             break;
         }
-        warn!("start run data scanner");
+        warn!("start run data scanner cycle");
 
         cycle_info.current = cycle_info.next;
         cycle_info.started = Utc::now();
@@ -251,6 +251,7 @@ pub async fn run_data_scanner(ctx: CancellationToken, storeapi: Arc<ECStore>) ->
                 info!("Data usage bloom name saved successfully");
             }
         }
+        warn!("finish run data scanner cycle");
 
         // Randomized inter-cycle delay
         tokio::select! {
@@ -272,15 +273,14 @@ pub async fn store_data_usage_in_backend(
     storeapi: Arc<ECStore>,
     mut receiver: mpsc::Receiver<DataUsageInfo>,
 ) {
-    warn!("store_data_useage_in_backend");
+    warn!("start store_data_useage_in_backend");
     let mut attempts = 1u32;
 
     while let Some(data_usage_info) = receiver.recv().await {
         if ctx.is_cancelled() {
             break;
         }
-
-        debug!("store_data_usage_in_backend: received data usage info: {:?}", &data_usage_info);
+        warn!("store_data_usage_in_backend: received data usage info: {:?}", &data_usage_info);
 
         // Serialize to JSON
         let data = match serde_json::to_vec(&data_usage_info) {
@@ -301,10 +301,13 @@ pub async fn store_data_usage_in_backend(
         }
 
         // Save main configuration
+        let file = &DATA_USAGE_OBJ_NAME_PATH;
+        warn!(file = ?file, "store_data_useage_in_backend, save main configuration");
         if let Err(e) = save_config(storeapi.clone(), &DATA_USAGE_OBJ_NAME_PATH, data).await {
             error!("Failed to save data usage info to {:?}: {e}", &DATA_USAGE_OBJ_NAME_PATH);
         }
 
         attempts += 1;
     }
+    warn!("finish store_data_useage_in_backend");
 }
