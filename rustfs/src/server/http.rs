@@ -660,7 +660,12 @@ fn process_connection(
                     })
                     .on_request(|request: &HttpRequest<_>, span: &Span| {
                         let _enter = span.enter();
-                        debug!("http started method: {}, url path: {}", request.method(), request.uri().path());
+                        warn!(
+                            method = ?request.method(),
+                            path = ?request.uri().path(),
+                            headers = ?request.headers(),
+                            "http request started"
+                        );
                         let labels = [
                             ("key_request_method", format!("{}", request.method())),
                             ("key_request_uri_path", request.uri().path().to_owned().to_string()),
