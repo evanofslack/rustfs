@@ -27,6 +27,7 @@ use rustfs_common::data_usage::{
     BucketTargetUsageInfo, BucketUsageInfo, DataUsageCache, DataUsageEntry, DataUsageInfo, DiskUsageStatus, SizeSummary,
 };
 use rustfs_utils::path::SLASH_SEPARATOR;
+use std::time::Instant;
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     sync::{Arc, OnceLock},
@@ -104,6 +105,9 @@ pub async fn store_data_usage_in_backend(data_usage_info: DataUsageInfo, store: 
 
 /// Load data usage info from backend storage
 pub async fn load_data_usage_from_backend(store: Arc<ECStore>) -> Result<DataUsageInfo, Error> {
+    let start = Instant::now();
+    warn!("Start load_data_usage_from_backend");
+
     let buf: Vec<u8> = match read_config(store.clone(), &DATA_USAGE_OBJ_NAME_PATH).await {
         Ok(data) => data,
         Err(e) => {
@@ -123,7 +127,7 @@ pub async fn load_data_usage_from_backend(store: Arc<ECStore>) -> Result<DataUsa
 
     // Validate data and supplement if empty
     if data_usage_info.buckets_count == 0 || data_usage_info.buckets_usage.is_empty() {
-        warn!("Loaded data is empty, supplementing with basic statistics");
+        warn!("Loaded useage data is empty, supplementing with basic statistics");
         if let Ok(basic_info) = build_basic_data_usage_info(store.clone()).await {
             data_usage_info.buckets_count = basic_info.buckets_count;
             data_usage_info.buckets_usage = basic_info.buckets_usage;
@@ -181,6 +185,15 @@ pub async fn load_data_usage_from_backend(store: Arc<ECStore>) -> Result<DataUsa
             );
         }
     }
+
+    let duration = start.elapsed();
+    warn!(
+        duration_seconds = duration.as_secs_f64(),
+        bucket_count = data_usage_info.buckets_count,
+        object_count = data_usage_info.objects_total_count,
+        object_size = data_usage_info.objects_total_size,
+        "Finish load_data_usage_from_backend",
+    );
 
     Ok(data_usage_info)
 }
@@ -500,6 +513,9 @@ pub async fn sync_memory_cache_with_backend() -> Result<(), Error> {
 
 /// Build basic data usage info with real object counts
 pub async fn build_basic_data_usage_info(store: Arc<ECStore>) -> Result<DataUsageInfo, Error> {
+    let start = Instant::now();
+    warn!("Start build_basic_data_usage_info");
+
     let mut data_usage_info = DataUsageInfo::default();
 
     // Get bucket list
@@ -545,6 +561,15 @@ pub async fn build_basic_data_usage_info(store: Arc<ECStore>) -> Result<DataUsag
             warn!("Failed to list buckets for basic data usage info: {}", e);
         }
     }
+
+    let duration = start.elapsed();
+    warn!(
+        duration_seconds = duration.as_secs_f64(),
+        bucket_count = data_usage_info.buckets_count,
+        object_count = data_usage_info.objects_total_count,
+        object_size = data_usage_info.objects_total_size,
+        "Finish build_basic_data_usage_info",
+    );
 
     Ok(data_usage_info)
 }
