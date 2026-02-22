@@ -42,7 +42,7 @@ pub const DATA_USAGE_ROOT: &str = SLASH_SEPARATOR;
 const DATA_USAGE_OBJ_NAME: &str = ".usage.json";
 const DATA_USAGE_BLOOM_NAME: &str = ".bloomcycle.bin";
 pub const DATA_USAGE_CACHE_NAME: &str = ".usage-cache.bin";
-const DATA_USAGE_CACHE_TTL_SECS: u64 = 30;
+const DATA_USAGE_CACHE_TTL_SECS: u64 = 600;
 
 type UsageMemoryCache = Arc<RwLock<HashMap<String, (u64, SystemTime)>>>;
 type CacheUpdating = Arc<RwLock<bool>>;
