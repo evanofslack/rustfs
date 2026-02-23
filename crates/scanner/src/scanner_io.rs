@@ -175,10 +175,22 @@ impl ScannerIO for ECStore {
 
                         let results = results_mutex.lock().await;
                         let mut all_merged = DataUsageCache::default();
+
+                        let mut all_valid = true;
                         for result in results.iter() {
                             if result.info.last_update.is_none() {
-                                continue;
+                                all_valid = false;
+                                break;
                             }
+                        }
+
+                        // Wait for all disk sets
+                        if !all_valid {
+                            continue;
+                        }
+
+                        // Now safe to merge and send
+                        for result in results.iter() {
                             all_merged.merge(result);
                         }
 
@@ -193,10 +205,22 @@ impl ScannerIO for ECStore {
                     _ = ticker.tick() => {
                         let results = results_mutex.lock().await;
                         let mut all_merged = DataUsageCache::default();
+
+                        let mut all_valid = true;
                         for result in results.iter() {
                             if result.info.last_update.is_none() {
-                                continue;
+                                all_valid = false;
+                                break;
                             }
+                        }
+
+                        // Wait for all disk sets
+                        if !all_valid {
+                            continue;
+                        }
+
+                        // Now safe to merge and send
+                        for result in results.iter() {
                             all_merged.merge(result);
                         }
 
