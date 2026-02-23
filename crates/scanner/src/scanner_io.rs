@@ -177,7 +177,7 @@ impl ScannerIO for ECStore {
                         let mut all_merged = DataUsageCache::default();
                         for result in results.iter() {
                             if result.info.last_update.is_none() {
-                                return;
+                                continue;
                             }
                             all_merged.merge(result);
                         }
@@ -195,7 +195,7 @@ impl ScannerIO for ECStore {
                         let mut all_merged = DataUsageCache::default();
                         for result in results.iter() {
                             if result.info.last_update.is_none() {
-                                return;
+                                continue;
                             }
                             all_merged.merge(result);
                         }
