@@ -175,10 +175,13 @@ impl ScannerIO for ECStore {
                         }
 
                         let results = results_mutex.lock().await;
+                        warn!("nsscanner (1) Aggregating {} results", results.len());
                         let mut all_merged = DataUsageCache::default();
-                        for result in results.iter() {
+                        for (i, result) in results.iter().enumerate() {
+                            warn!("nsscanner (1) Result {}: last_update={:?}", i, result.info.last_update);
                             if result.info.last_update.is_none() {
-                                return;
+                                warn!("nsscanner (1) Skipping result with no last_update");
+                                continue;
                             }
                             all_merged.merge(result);
                         }
@@ -194,20 +197,30 @@ impl ScannerIO for ECStore {
                     _ = ticker.tick() => {
                         let results = results_mutex.lock().await;
                         let mut all_merged = DataUsageCache::default();
-                        for result in results.iter() {
+                        for (i, result) in results.iter().enumerate() {
+                            warn!("nsscanner (2) Result {}: last_update={:?}", i, result.clone().info.last_update);
                             if result.info.last_update.is_none() {
-                                return;
+                                warn!("nsscanner (2) Skipping result with no last_update");
+                                continue;
                             }
                             all_merged.merge(result);
                         }
 
+                        warn!("nsscanner merged cache: root={:?}, last_update={:?}",
+                            all_merged.root().is_some(), all_merged.info.last_update);
+
                         if all_merged.root().is_some() && all_merged.info.last_update.unwrap() > last_update {
-                           if let Err(e) = updates
+                            warn!("nsscanner sending DataUsageInfo");
+                            if let Err(e) = updates
                                 .send(all_merged.dui(&all_merged.info.name, &all_buckets_clone))
                                 .await {
                                 error!("Failed to send data usage info: {}", e);
                             }
                             last_update = all_merged.info.last_update.unwrap();
+                        } else {
+                            warn!("nsscanner not sending: root={:?}, last_update_check={:?}",
+                                    all_merged.root().is_some(),
+                                    all_merged.info.last_update.map(|u| u > last_update));
                         }
                     }
                 }
