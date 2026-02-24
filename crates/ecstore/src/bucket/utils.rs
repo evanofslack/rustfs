@@ -20,9 +20,6 @@ use s3s::xml;
 use tracing::instrument;
 
 pub fn is_meta_bucketname(name: &str) -> bool {
-    if rustfs_utils::get_env_bool("RUSTFS_ALLOW_META_BUCKET_ACCESS", false) {
-        return false;
-    }
     name.starts_with(RUSTFS_META_BUCKET)
 }
 
@@ -243,7 +240,9 @@ pub fn check_del_obj_args(bucket: &str, object: &str) -> Result<()> {
 }
 
 pub fn check_bucket_and_object_names(bucket: &str, object: &str) -> Result<()> {
-    if !is_meta_bucketname(bucket) && check_valid_bucket_name_strict(bucket).is_err() {
+    let allow_meta = rustfs_utils::get_env_bool("RUSTFS_ALLOW_META_BUCKET_ACCESS", false);
+
+    if !allow_meta && !is_meta_bucketname(bucket) && check_valid_bucket_name_strict(bucket).is_err() {
         return Err(StorageError::BucketNameInvalid(bucket.to_string()));
     }
 
@@ -302,7 +301,9 @@ pub fn check_list_multipart_args(
 }
 
 pub fn check_object_args(bucket: &str, object: &str) -> Result<()> {
-    if !is_meta_bucketname(bucket) && check_valid_bucket_name_strict(bucket).is_err() {
+    let allow_meta = rustfs_utils::get_env_bool("RUSTFS_ALLOW_META_BUCKET_ACCESS", false);
+
+    if !allow_meta && !is_meta_bucketname(bucket) && check_valid_bucket_name_strict(bucket).is_err() {
         return Err(StorageError::BucketNameInvalid(bucket.to_string()));
     }
 
