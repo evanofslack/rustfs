@@ -20,6 +20,9 @@ use s3s::xml;
 use tracing::instrument;
 
 pub fn is_meta_bucketname(name: &str) -> bool {
+    if rustfs_utils::get_env_bool("RUSTFS_ALLOW_META_BUCKET_ACCESS", false) {
+        return false;
+    }
     name.starts_with(RUSTFS_META_BUCKET)
 }
 
