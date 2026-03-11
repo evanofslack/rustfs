@@ -35,7 +35,8 @@ default = ["metrics"]
 metrics = []
 ftps = ["rustfs-protocols/ftps"]
 swift = ["rustfs-protocols/swift"]
-full = ["metrics", "ftps", "swift"]
+batch-operations = ["dep:rustfs-batch"]
+full = ["metrics", "ftps", "swift", "batch-operations"]
 
 [lints]
 workspace = true
@@ -44,6 +45,7 @@ workspace = true
 # RustFS Internal Crates
 rustfs-heal = { workspace = true }
 rustfs-appauth = { workspace = true }
+rustfs-batch = { workspace = true, optional = true }
 rustfs-audit = { workspace = true }
 rustfs-common = { workspace = true }
 rustfs-config = { workspace = true, features = ["constants", "notify"] }

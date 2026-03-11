@@ -17,6 +17,8 @@ use crate::admin::{
     router::{AdminOperation, S3Router},
     rpc,
 };
+#[cfg(feature = "batch-operations")]
+use crate::admin::handlers::batch;
 use crate::server::{ADMIN_PREFIX, HEALTH_PREFIX, HEALTH_READY_PATH, PROFILE_CPU_PATH, PROFILE_MEMORY_PATH};
 use hyper::Method;
 
@@ -104,6 +106,20 @@ fn test_register_routes_cover_representative_admin_paths() {
     assert_route(&router, Method::GET, &admin_path("/v3/kms/keys/test-key"));
     assert_route(&router, Method::GET, "/rustfs/rpc/read_file_stream");
     assert_route(&router, Method::HEAD, "/rustfs/rpc/read_file_stream");
+}
+
+#[cfg(feature = "batch-operations")]
+#[test]
+fn test_batch_routes_registered() {
+    let mut router: S3Router<AdminOperation> = S3Router::new(false);
+    batch::register_batch_route(&mut router).expect("register batch routes");
+
+    assert_route(&router, Method::POST, &admin_path("/v3/start-job"));
+    assert_route(&router, Method::GET, &admin_path("/v3/list-jobs"));
+    assert_route(&router, Method::GET, &admin_path("/v3/status-job"));
+    assert_route(&router, Method::GET, &admin_path("/v3/describe-job"));
+    assert_route(&router, Method::DELETE, &admin_path("/v3/cancel-job"));
+    assert_route(&router, Method::GET, &admin_path("/v3/generate-job"));
 }
 
 #[test]

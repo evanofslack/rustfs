@@ -430,6 +430,13 @@ async fn run(config: config::Config) -> Result<()> {
         info!(target: "rustfs::main::run","Both scanner and heal are disabled, skipping AHM service initialization");
     }
 
+    // Initialize batch job service (behind feature flag)
+    #[cfg(feature = "batch-operations")]
+    {
+        info!(target: "rustfs::main::run", "Initializing batch job service");
+        rustfs_batch::init_batch_service(store.clone()).await;
+    }
+
     // print server info
     print_server_info();
 

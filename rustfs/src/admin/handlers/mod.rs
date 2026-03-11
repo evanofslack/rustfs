@@ -13,6 +13,8 @@
 // limitations under the License.
 
 pub mod account_info;
+#[cfg(feature = "batch-operations")]
+pub mod batch;
 pub mod bucket_meta;
 pub mod event;
 pub mod group;
@@ -64,6 +66,16 @@ mod tests {
         let _set_remote_target_handler = replication::SetRemoteTargetHandler {};
         let _list_remote_target_handler = replication::ListRemoteTargetHandler {};
         let _remove_remote_target_handler = replication::RemoveRemoteTargetHandler {};
+
+        #[cfg(feature = "batch-operations")]
+        {
+            let _start_batch = batch::StartBatchJobHandler {};
+            let _list_batch = batch::ListBatchJobsHandler {};
+            let _status_batch = batch::BatchJobStatusHandler {};
+            let _describe_batch = batch::DescribeBatchJobHandler {};
+            let _cancel_batch = batch::CancelBatchJobHandler {};
+            let _generate_batch = batch::GenerateBatchJobHandler {};
+        }
 
         // Just verify they can be created without panicking
         // Test passes if we reach this point without panicking

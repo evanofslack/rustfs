@@ -16,6 +16,7 @@
 members = [
     "rustfs", # Core file system implementation
     "crates/appauth", # Application authentication and authorization
+    "crates/batch", # Batch job framework (replicate, future: keyrotate, expire)
     "crates/audit", # Audit target management system with multi-target fan-out
     "crates/checksums", # client checksums
     "crates/common", # Shared utilities and data structures
@@ -75,6 +76,7 @@ all = "warn"
 rustfs = { path = "./rustfs", version = "0.0.5" }
 rustfs-heal = { path = "crates/heal", version = "0.0.5" }
 rustfs-appauth = { path = "crates/appauth", version = "0.0.5" }
+rustfs-batch = { path = "crates/batch", version = "0.0.5" }
 rustfs-audit = { path = "crates/audit", version = "0.0.5" }
 rustfs-checksums = { path = "crates/checksums", version = "0.0.5" }
 rustfs-common = { path = "crates/common", version = "0.0.5" }
@@ -149,6 +151,7 @@ rmp = { version = "0.8.15" }
 rmp-serde = { version = "1.3.1" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["raw_value"] }
+serde_yaml = "0.9"
 serde_urlencoded = "0.7.1"
 schemars = "1.2.1"
 
