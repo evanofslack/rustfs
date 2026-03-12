@@ -22,7 +22,7 @@
 use crate::error::{BatchError, Result};
 use crate::job::BatchJob;
 use rustfs_ecstore::config::com::{read_config, save_config};
-use rustfs_ecstore::store_api::{ListOperations, StorageAPI};
+use rustfs_ecstore::store_api::StorageAPI;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::warn;

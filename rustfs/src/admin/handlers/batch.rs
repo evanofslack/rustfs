@@ -107,7 +107,10 @@ impl Operation for StartBatchJobHandler {
         let user = validate_batch_admin_request(&req, AdminAction::StartBatchJobAction).await?;
 
         let Some(svc) = get_global_batch_service() else {
-            return Err(S3Error::with_message(S3ErrorCode::InternalError, "batch service not initialized".into()));
+            return Err(S3Error::with_message(
+                S3ErrorCode::InternalError,
+                "batch service not initialized".to_string(),
+            ));
         };
 
         let mut input = req.input;
@@ -124,7 +127,7 @@ impl Operation for StartBatchJobHandler {
             Ok(result) => json_response(result),
             Err(rustfs_batch::error::BatchError::DuplicateJob) => Err(S3Error::with_message(
                 S3ErrorCode::BucketAlreadyExists,
-                "an active job already exists for this source+target combination".into(),
+                "an active job already exists for this source+target combination".to_string(),
             )),
             Err(rustfs_batch::error::BatchError::InvalidJobDefinition(msg))
             | Err(rustfs_batch::error::BatchError::UnsupportedJobType(msg)) => {
@@ -146,7 +149,10 @@ impl Operation for ListBatchJobsHandler {
         validate_batch_admin_request(&req, AdminAction::ListBatchJobsAction).await?;
 
         let Some(svc) = get_global_batch_service() else {
-            return Err(S3Error::with_message(S3ErrorCode::InternalError, "batch service not initialized".into()));
+            return Err(S3Error::with_message(
+                S3ErrorCode::InternalError,
+                "batch service not initialized".to_string(),
+            ));
         };
 
         let params = extract_query_params(&req.uri);
@@ -165,7 +171,10 @@ impl Operation for BatchJobStatusHandler {
         validate_batch_admin_request(&req, AdminAction::DescribeBatchJobAction).await?;
 
         let Some(svc) = get_global_batch_service() else {
-            return Err(S3Error::with_message(S3ErrorCode::InternalError, "batch service not initialized".into()));
+            return Err(S3Error::with_message(
+                S3ErrorCode::InternalError,
+                "batch service not initialized".to_string(),
+            ));
         };
 
         let params = extract_query_params(&req.uri);
@@ -191,7 +200,10 @@ impl Operation for DescribeBatchJobHandler {
         validate_batch_admin_request(&req, AdminAction::DescribeBatchJobAction).await?;
 
         let Some(svc) = get_global_batch_service() else {
-            return Err(S3Error::with_message(S3ErrorCode::InternalError, "batch service not initialized".into()));
+            return Err(S3Error::with_message(
+                S3ErrorCode::InternalError,
+                "batch service not initialized".to_string(),
+            ));
         };
 
         let params = extract_query_params(&req.uri);
@@ -217,7 +229,10 @@ impl Operation for CancelBatchJobHandler {
         validate_batch_admin_request(&req, AdminAction::CancelBatchJobAction).await?;
 
         let Some(svc) = get_global_batch_service() else {
-            return Err(S3Error::with_message(S3ErrorCode::InternalError, "batch service not initialized".into()));
+            return Err(S3Error::with_message(
+                S3ErrorCode::InternalError,
+                "batch service not initialized".to_string(),
+            ));
         };
 
         let params = extract_query_params(&req.uri);
@@ -248,7 +263,7 @@ impl Operation for GenerateBatchJobHandler {
         let job_type = params.get("jobType").map(|s| s.as_str()).unwrap_or("replicate");
 
         match job_type {
-            "replicate" => Ok(S3Response::new((StatusCode::OK, Body::from(REPLICATE_JOB_TEMPLATE)))),
+            "replicate" => Ok(S3Response::new((StatusCode::OK, Body::from(REPLICATE_JOB_TEMPLATE.into())))),
             other => Err(S3Error::with_message(
                 S3ErrorCode::InvalidArgument,
                 format!("unsupported jobType: {other}"),
