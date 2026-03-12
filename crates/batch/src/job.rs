@@ -160,7 +160,7 @@ impl JobCounters {
 }
 
 /// Control handle for a running job.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct JobControl {
     pub cancel: CancellationToken,
     pub workers: usize,
@@ -268,7 +268,7 @@ mod tests {
         let config = crate::yaml::ReplicateJobYaml {
             api_version: "v1".into(),
             source: crate::yaml::EndpointYaml {
-                endpoint_type: "minio".into(),
+                endpoint_type: "rustfs".into(),
                 bucket: "src".into(),
                 prefix: None,
                 endpoint: None,

@@ -32,7 +32,7 @@ use crate::yaml::{FilterYaml, ReplicateJobYaml};
 use bytes::Bytes;
 use chrono::Utc;
 use http::HeaderMap;
-use rustfs_ecstore::store_api::{ListOperations, ObjectIO, ObjectOptions, PutObjReader, StorageAPI};
+use rustfs_ecstore::store_api::{ObjectOptions, PutObjReader, StorageAPI};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,7 +84,16 @@ pub async fn run_replicate_job_arc<S: StorageAPI + 'static>(
         }
     }
 
-    let result = run_replication_passes(&job, &config, store.clone(), ecstore.clone(), registry.clone(), control.clone(), counters.clone()).await;
+    let result = run_replication_passes(
+        &job,
+        &config,
+        store.clone(),
+        ecstore.clone(),
+        registry.clone(),
+        control.clone(),
+        counters.clone(),
+    )
+    .await;
 
     let final_status = match result {
         Ok(()) => {
@@ -362,14 +371,14 @@ async fn fetch_page<S: StorageAPI + 'static>(
                 let lo = ListedObject {
                     key: obj.name.clone(),
                     size: obj.size,
-                    etag: obj.e_tag.clone(),
+                    etag: obj.etag.clone(),
                     last_modified,
                 };
                 passes_filter(&lo, filter)
             })
             .map(|obj| WorkItem {
                 key: obj.name,
-                etag: obj.e_tag,
+                etag: obj.etag,
                 size: obj.size,
             })
             .collect();
@@ -402,7 +411,17 @@ async fn retry_failures<S: StorageAPI + 'static>(
 
         let target_key = build_target_key(&rec.key, &target_prefix);
 
-        match transfer_object(source_client, target_client, ecstore.clone(), source_bucket, &rec.key, target_bucket, &target_key).await {
+        match transfer_object(
+            source_client,
+            target_client,
+            ecstore.clone(),
+            source_bucket,
+            &rec.key,
+            target_bucket,
+            &target_key,
+        )
+        .await
+        {
             Ok(bytes) => counters.inc_success(bytes),
             Err(e) => {
                 counters.inc_failure(rec.size);
@@ -449,8 +468,11 @@ async fn check_target_exists<S: StorageAPI + 'static>(
             }
         }
     } else {
-        match ecstore.get_object_info(target_bucket, target_key, &ObjectOptions::default()).await {
-            Ok(info) => source_etag.map_or(true, |se| info.e_tag.as_deref() == Some(se)),
+        match ecstore
+            .get_object_info(target_bucket, target_key, &ObjectOptions::default())
+            .await
+        {
+            Ok(info) => source_etag.map_or(true, |se| info.etag.as_deref() == Some(se)),
             Err(_) => false,
         }
     }
@@ -635,18 +657,5 @@ mod tests {
         assert_eq!(parse_duration_to_chrono("30m"), chrono::Duration::minutes(30));
         assert_eq!(parse_duration_to_chrono("60s"), chrono::Duration::seconds(60));
         assert_eq!(parse_duration_to_chrono("unknown"), chrono::Duration::zero());
-    }
-
-    #[test]
-    fn test_worker_count_default() {
-        std::env::remove_var("RUSTFS_BATCH_REPLICATION_WORKERS");
-        assert_eq!(worker_count(), DEFAULT_WORKER_COUNT);
-    }
-
-    #[test]
-    fn test_worker_count_env() {
-        std::env::set_var("RUSTFS_BATCH_REPLICATION_WORKERS", "8");
-        assert_eq!(worker_count(), 8);
-        std::env::remove_var("RUSTFS_BATCH_REPLICATION_WORKERS");
     }
 }

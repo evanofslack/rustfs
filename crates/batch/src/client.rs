@@ -57,18 +57,10 @@ impl BatchS3Client {
             return Ok(None);
         };
         let Some(creds) = &endpoint.credentials else {
-            return Err(BatchError::InvalidJobDefinition(
-                "remote endpoint requires credentials".into(),
-            ));
+            return Err(BatchError::InvalidJobDefinition("remote endpoint requires credentials".into()));
         };
 
-        let sdk_creds = SdkCredentials::new(
-            creds.access_key.clone(),
-            creds.secret_key.clone(),
-            None,
-            None,
-            "rustfs-batch",
-        );
+        let sdk_creds = SdkCredentials::new(creds.access_key.clone(), creds.secret_key.clone(), None, None, "rustfs-batch");
 
         let config = aws_sdk_s3::Config::builder()
             .endpoint_url(url.clone())
@@ -89,11 +81,7 @@ impl BatchS3Client {
     pub async fn list_objects_page(&self, continuation_token: Option<&str>) -> Result<ListPage> {
         let prefix = self.prefix.clone().unwrap_or_default();
 
-        let mut req = self
-            .client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .max_keys(1000);
+        let mut req = self.client.list_objects_v2().bucket(&self.bucket).max_keys(1000);
 
         if !prefix.is_empty() {
             req = req.prefix(prefix);
@@ -102,10 +90,7 @@ impl BatchS3Client {
             req = req.continuation_token(token);
         }
 
-        let output = req
-            .send()
-            .await
-            .map_err(|e| BatchError::S3Client(e.to_string()))?;
+        let output = req.send().await.map_err(|e| BatchError::S3Client(e.to_string()))?;
 
         let objects = output
             .contents()
@@ -138,13 +123,7 @@ impl BatchS3Client {
 
     /// HEAD an object to check existence and ETag.
     pub async fn head_object(&self, key: &str) -> Result<Option<HeadResult>> {
-        let result = self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await;
+        let result = self.client.head_object().bucket(&self.bucket).key(key).send().await;
 
         match result {
             Ok(output) => {
@@ -202,9 +181,7 @@ impl BatchS3Client {
             req = req.metadata(k, v);
         }
 
-        req.send()
-            .await
-            .map_err(|e| BatchError::S3Client(e.to_string()))?;
+        req.send().await.map_err(|e| BatchError::S3Client(e.to_string()))?;
 
         Ok(())
     }
@@ -225,7 +202,7 @@ mod tests {
     #[tokio::test]
     async fn test_local_endpoint_returns_none() {
         let endpoint = EndpointYaml {
-            endpoint_type: "minio".into(),
+            endpoint_type: "rustfs".into(),
             bucket: "local-bucket".into(),
             prefix: None,
             endpoint: None,

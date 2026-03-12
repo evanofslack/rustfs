@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! In-memory job registry with deduplication and startup recovery.
-
 use crate::error::{BatchError, Result};
 use crate::job::{BatchJob, BatchJobInfo, BatchJobStatusType, BatchJobType, JobControl, JobCounters, ListBatchJobsResult};
 use crate::store::BatchStore;
@@ -116,7 +114,9 @@ impl JobRegistry {
     /// Cancel a job, returning an error if not found.
     pub async fn cancel(&self, job_id: &str) -> Result<()> {
         let entries = self.entries.read().await;
-        let entry = entries.get(job_id).ok_or_else(|| BatchError::JobNotFound(job_id.to_owned()))?;
+        let entry = entries
+            .get(job_id)
+            .ok_or_else(|| BatchError::JobNotFound(job_id.to_owned()))?;
         entry.control.cancel.cancel();
         Ok(())
     }
@@ -166,10 +166,7 @@ impl JobRegistry {
 
     /// Load completed/failed/cancelled jobs from disk into registry for listing.
     /// In-progress jobs are re-queued for resumption.
-    pub async fn load_from_store<S: StorageAPI>(
-        &self,
-        store: &BatchStore<S>,
-    ) -> Vec<BatchJob> {
+    pub async fn load_from_store<S: StorageAPI>(&self, store: &BatchStore<S>) -> Vec<BatchJob> {
         let job_ids = store.list_job_ids().await;
         let mut to_resume = Vec::new();
 
@@ -212,7 +209,10 @@ impl JobRegistry {
         let mut entries = self.entries.write().await;
         if let Some(entry) = entries.get_mut(job_id) {
             entry.job.status = status;
-            if matches!(entry.job.status, BatchJobStatusType::Completed | BatchJobStatusType::Failed | BatchJobStatusType::Cancelled) {
+            if matches!(
+                entry.job.status,
+                BatchJobStatusType::Completed | BatchJobStatusType::Failed | BatchJobStatusType::Cancelled
+            ) {
                 entry.job.finished_at = Some(Utc::now());
             }
         }
@@ -272,7 +272,7 @@ mod tests {
         let config = ReplicateJobYaml {
             api_version: "v1".into(),
             source: EndpointYaml {
-                endpoint_type: "minio".into(),
+                endpoint_type: "rustfs".into(),
                 bucket: "src".into(),
                 prefix: None,
                 endpoint: None,
@@ -383,7 +383,9 @@ mod tests {
             .await
             .expect("register");
 
-        registry.unregister("job-1", None, "src", Some("https://remote:9000"), "dst").await;
+        registry
+            .unregister("job-1", None, "src", Some("https://remote:9000"), "dst")
+            .await;
 
         let job2 = make_test_job("job-2");
         registry

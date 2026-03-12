@@ -38,7 +38,7 @@ use chrono::Utc;
 use error::Result;
 use job::{BatchJob, BatchJobStatusType, BatchJobType};
 use registry::JobRegistry;
-use rustfs_ecstore::ECStore;
+use rustfs_ecstore::store::ECStore;
 use rustfs_ecstore::store_api::StorageAPI;
 use std::sync::{Arc, OnceLock};
 use store::BatchStore;
@@ -81,8 +81,7 @@ impl<S: StorageAPI + 'static> BatchService<S> {
     /// Returns a [`BatchJob`] with the assigned ID, or an error if the job definition is
     /// invalid, or a duplicate job is already active.
     pub async fn start_job(&self, yaml_bytes: &[u8], user: String) -> Result<job::BatchJobResult> {
-        let yaml_str = std::str::from_utf8(yaml_bytes)
-            .map_err(|e| error::BatchError::InvalidJobDefinition(e.to_string()))?;
+        let yaml_str = std::str::from_utf8(yaml_bytes).map_err(|e| error::BatchError::InvalidJobDefinition(e.to_string()))?;
 
         let job_def: BatchJobYaml = BatchJobYaml::from_yaml_str(yaml_str)?;
 

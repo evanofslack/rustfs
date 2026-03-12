@@ -35,6 +35,7 @@ rustfs-madmin = { workspace = true }
 
 aws-sdk-s3 = { workspace = true }
 
+http = {workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

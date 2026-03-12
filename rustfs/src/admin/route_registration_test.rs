@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "batch-operations")]
+use crate::admin::handlers::batch;
 use crate::admin::{
     handlers::{bucket_meta, heal, health, kms, pools, profile_admin, quota, rebalance, replication, sts, system, tier, user},
     router::{AdminOperation, S3Router},
     rpc,
 };
-#[cfg(feature = "batch-operations")]
-use crate::admin::handlers::batch;
 use crate::server::{ADMIN_PREFIX, HEALTH_PREFIX, HEALTH_READY_PATH, PROFILE_CPU_PATH, PROFILE_MEMORY_PATH};
 use hyper::Method;
 

@@ -24,11 +24,11 @@ mod console_test;
 #[cfg(test)]
 mod route_registration_test;
 
+#[cfg(feature = "batch-operations")]
+use handlers::batch;
 use handlers::{
     bucket_meta, heal, health, kms, oidc, pools, profile_admin, quota, rebalance, replication, sts, system, tier, user,
 };
-#[cfg(feature = "batch-operations")]
-use handlers::batch;
 use router::{AdminOperation, S3Router};
 use rpc::register_rpc_route;
 use s3s::route::S3Route;

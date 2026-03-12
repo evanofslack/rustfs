@@ -7297,6 +7297,7 @@ dependencies = [
  "aws-sdk-s3",
  "bytes",
  "chrono",
+ "http 1.4.0",
  "rustfs-ecstore",
  "rustfs-madmin",
  "serde",

@@ -99,9 +99,7 @@ impl<S: StorageAPI> BatchStore<S> {
     pub async fn append_failure(&self, job_id: &str, record: &FailureRecord) -> Result<()> {
         let path = failures_jsonl_path(job_id);
 
-        let existing = read_config(self.store.clone(), &path)
-            .await
-            .unwrap_or_default();
+        let existing = read_config(self.store.clone(), &path).await.unwrap_or_default();
 
         let mut new_line = serde_json::to_vec(record).map_err(BatchError::Json)?;
         new_line.push(b'\n');
@@ -154,27 +152,14 @@ impl<S: StorageAPI> BatchStore<S> {
         match self
             .store
             .clone()
-            .list_objects_v2(
-                RUSTFS_META_BUCKET,
-                &prefix,
-                None,
-                Some("/".to_string()),
-                1000,
-                false,
-                None,
-                false,
-            )
+            .list_objects_v2(RUSTFS_META_BUCKET, &prefix, None, Some("/".to_string()), 1000, false, None, false)
             .await
         {
             Ok(result) => result
                 .prefixes
                 .into_iter()
                 .filter_map(|p| {
-                    let stripped = p
-                        .strip_prefix(&prefix)
-                        .unwrap_or("")
-                        .trim_end_matches('/')
-                        .to_owned();
+                    let stripped = p.strip_prefix(&prefix).unwrap_or("").trim_end_matches('/').to_owned();
                     if stripped.is_empty() { None } else { Some(stripped) }
                 })
                 .collect(),

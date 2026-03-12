@@ -37,7 +37,7 @@ pub struct ReplicateJobYaml {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointYaml {
-    /// "s3" or "minio"
+    /// "s3" or "rustfs"
     #[serde(rename = "type")]
     pub endpoint_type: String,
     pub bucket: String,

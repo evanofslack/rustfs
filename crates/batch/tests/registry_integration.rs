@@ -23,7 +23,7 @@ fn make_job(id: &str, source_bucket: &str, target_bucket: &str) -> BatchJob {
     let config = ReplicateJobYaml {
         api_version: "v1".into(),
         source: EndpointYaml {
-            endpoint_type: "minio".into(),
+            endpoint_type: "rustfs".into(),
             bucket: source_bucket.into(),
             prefix: None,
             endpoint: None,
@@ -89,7 +89,9 @@ async fn test_registry_lifecycle() {
     assert_eq!(updated.status, BatchJobStatusType::Cancelled);
     assert!(updated.finished_at.is_some());
 
-    registry.unregister("j1", None, "bucket-src", Some("https://remote.example.com:9000"), "bucket-dst").await;
+    registry
+        .unregister("j1", None, "bucket-src", Some("https://remote.example.com:9000"), "bucket-dst")
+        .await;
     assert!(registry.get_job("j1").await.is_none());
 }
 
