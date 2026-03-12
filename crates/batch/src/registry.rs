@@ -19,6 +19,7 @@ use chrono::Utc;
 use rustfs_ecstore::store_api::StorageAPI;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -97,7 +98,9 @@ impl JobRegistry {
         Ok((control, counters))
     }
 
-    /// Remove a job from the registry (called on completion, cancellation, or failure).
+    /// Release the dedup lock for a job when it reaches a terminal state, so a new job
+    /// with the same source+target combination can be started. The entry remains in
+    /// `entries` until evicted by `evict_expired`.
     pub async fn unregister(
         &self,
         job_id: &str,
@@ -108,7 +111,26 @@ impl JobRegistry {
     ) {
         let key = dedup_key(source_endpoint, source_bucket, target_endpoint, target_bucket);
         self.dedup.write().await.remove(&key);
-        self.entries.write().await.remove(job_id);
+        // Entry stays in `entries` for the retention window, do not remove it here.
+        let _ = job_id;
+    }
+
+    /// Remove registry entries whose effective end time is older than `retention`.
+    /// Called periodically by the background eviction task.
+    pub async fn evict_expired(&self, retention: Duration) {
+        let cutoff = Utc::now() - chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::days(3));
+        let mut entries = self.entries.write().await;
+        entries.retain(|_, entry| {
+            let is_terminal = matches!(
+                entry.job.status,
+                BatchJobStatusType::Completed | BatchJobStatusType::Failed | BatchJobStatusType::Cancelled
+            );
+            if !is_terminal {
+                return true;
+            }
+            let end_time = entry.job.finished_at.unwrap_or(entry.job.created_at);
+            end_time >= cutoff
+        });
     }
 
     /// Cancel a job, returning an error if not found.
@@ -127,6 +149,7 @@ impl JobRegistry {
     }
 
     /// Return a live progress snapshot for a job (merges counters into the stored job snapshot).
+    /// Works for both active and retained terminal jobs.
     pub async fn get_active_job_snapshot(&self, job_id: &str) -> Option<ActiveJobSnapshot> {
         let entries = self.entries.read().await;
         let entry = entries.get(job_id)?;
@@ -140,17 +163,74 @@ impl JobRegistry {
         })
     }
 
-    /// List all registered jobs as `BatchJobInfo` entries.
-    pub async fn list_jobs(&self, job_type_filter: Option<&str>) -> ListBatchJobsResult {
+    /// Return a snapshot for the most recently created in-progress job, or `None` if no
+    /// active jobs exist.
+    pub async fn get_last_active_job_snapshot(&self) -> Option<ActiveJobSnapshot> {
+        let entries = self.entries.read().await;
+        let entry = entries
+            .values()
+            .filter(|e| e.job.status == BatchJobStatusType::InProgress)
+            .max_by_key(|e| e.job.created_at)?;
+        let (objects, objects_failed, bytes_transferred, bytes_failed) = entry.counters.snapshot();
+        Some(ActiveJobSnapshot {
+            job: entry.job.clone(),
+            objects,
+            objects_failed,
+            bytes_transferred,
+            bytes_failed,
+        })
+    }
+
+    /// Return snapshots for all jobs currently in the registry (within the retention window).
+    pub async fn get_all_job_snapshots(&self) -> Vec<ActiveJobSnapshot> {
+        let entries = self.entries.read().await;
+        let mut snapshots: Vec<ActiveJobSnapshot> = entries
+            .values()
+            .map(|entry| {
+                let (objects, objects_failed, bytes_transferred, bytes_failed) = entry.counters.snapshot();
+                ActiveJobSnapshot {
+                    job: entry.job.clone(),
+                    objects,
+                    objects_failed,
+                    bytes_transferred,
+                    bytes_failed,
+                }
+            })
+            .collect();
+        snapshots.sort_by_key(|s| s.job.created_at);
+        snapshots
+    }
+
+    /// List registered jobs with optional filters for type, status, and bucket.
+    ///
+    /// `bucket_filter` matches jobs where either the source or target bucket equals the value.
+    pub async fn list_jobs(
+        &self,
+        job_type_filter: Option<&str>,
+        status_filter: Option<&str>,
+        bucket_filter: Option<&str>,
+    ) -> ListBatchJobsResult {
         let entries = self.entries.read().await;
         let jobs = entries
             .values()
             .filter(|e| {
-                if let Some(jt) = job_type_filter {
-                    e.job.job_type.to_string() == jt
-                } else {
-                    true
+                if let Some(jt) = job_type_filter
+                    && e.job.job_type.to_string() != jt
+                {
+                    return false;
                 }
+                if let Some(st) = status_filter
+                    && e.job.status.to_string() != st
+                {
+                    return false;
+                }
+                if let Some(bucket) = bucket_filter
+                    && e.job.source_bucket != bucket
+                    && e.job.target_bucket != bucket
+                {
+                    return false;
+                }
+                true
             })
             .map(|e| BatchJobInfo {
                 id: e.job.id.clone(),
@@ -353,7 +433,7 @@ mod tests {
             .await
             .expect("register");
 
-        let result = registry.list_jobs(None).await;
+        let result = registry.list_jobs(None, None, None).await;
         assert_eq!(result.jobs.len(), 1);
         assert_eq!(result.jobs[0].id, "job-list");
     }
@@ -367,11 +447,73 @@ mod tests {
             .await
             .expect("register");
 
-        let result = registry.list_jobs(Some("replicate")).await;
+        let result = registry.list_jobs(Some("replicate"), None, None).await;
         assert_eq!(result.jobs.len(), 1);
 
-        let result_empty = registry.list_jobs(Some("keyrotate")).await;
+        let result_empty = registry.list_jobs(Some("keyrotate"), None, None).await;
         assert_eq!(result_empty.jobs.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_list_jobs_filter_by_bucket() {
+        let registry = JobRegistry::new();
+        let job = make_test_job("job-bucket");
+        registry
+            .register(job, None, "src", Some("https://remote:9000"), "dst", 4)
+            .await
+            .expect("register");
+
+        let result = registry.list_jobs(None, None, Some("src")).await;
+        assert_eq!(result.jobs.len(), 1);
+
+        let result = registry.list_jobs(None, None, Some("dst")).await;
+        assert_eq!(result.jobs.len(), 1);
+
+        let result = registry.list_jobs(None, None, Some("other")).await;
+        assert_eq!(result.jobs.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_list_jobs_filter_by_status() {
+        let registry = JobRegistry::new();
+        let job = make_test_job("job-status-filter");
+        registry
+            .register(job, None, "src", Some("https://remote:9000"), "dst", 4)
+            .await
+            .expect("register");
+
+        let result = registry.list_jobs(None, Some("in-progress"), None).await;
+        assert_eq!(result.jobs.len(), 1);
+
+        let result = registry.list_jobs(None, Some("completed"), None).await;
+        assert_eq!(result.jobs.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_last_active_job_snapshot() {
+        let registry = JobRegistry::new();
+        let job = make_test_job("job-last-active");
+        registry
+            .register(job, None, "src", Some("https://remote:9000"), "dst", 4)
+            .await
+            .expect("register");
+
+        let snapshot = registry.get_last_active_job_snapshot().await;
+        assert!(snapshot.is_some());
+        assert_eq!(snapshot.unwrap().job.id, "job-last-active");
+    }
+
+    #[tokio::test]
+    async fn test_get_all_job_snapshots() {
+        let registry = JobRegistry::new();
+        let job = make_test_job("job-all");
+        registry
+            .register(job, None, "src", Some("https://remote:9000"), "dst", 4)
+            .await
+            .expect("register");
+
+        let snapshots = registry.get_all_job_snapshots().await;
+        assert_eq!(snapshots.len(), 1);
     }
 
     #[tokio::test]

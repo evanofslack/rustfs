@@ -77,7 +77,6 @@ pub struct BatchJob {
     pub objects_failed: i64,
     pub bytes_transferred: i64,
     pub bytes_failed: i64,
-    // Timestamps.
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
@@ -88,6 +87,12 @@ pub struct BatchJob {
     /// S3 continuation token for resuming interrupted enumeration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_continuation_token: Option<String>,
+    /// Source bucket name (for list filtering without YAML parse).
+    #[serde(default)]
+    pub source_bucket: String,
+    /// Target bucket name (for list filtering without YAML parse).
+    #[serde(default)]
+    pub target_bucket: String,
 }
 
 impl BatchJob {
@@ -119,6 +124,8 @@ impl BatchJob {
             finished_at: None,
             last_persisted_at: None,
             last_continuation_token: None,
+            source_bucket: config.source.bucket.clone(),
+            target_bucket: config.target.bucket.clone(),
         }
     }
 
@@ -190,6 +197,12 @@ pub struct BatchJobResult {
 pub struct BatchJobStatus {
     #[serde(rename = "LastMetric")]
     pub last_metric: rustfs_madmin::metrics::JobMetric,
+}
+
+/// Response for `?all=true` on status-job — returns all jobs in the retention window.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchJobStatusList {
+    pub statuses: Vec<BatchJobStatus>,
 }
 
 /// Entry in a list-jobs response (matches BatchJobInfo in madmin-go).

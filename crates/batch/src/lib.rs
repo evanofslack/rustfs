@@ -34,18 +34,29 @@ pub mod store;
 pub mod worker;
 pub mod yaml;
 
-use chrono::Utc;
 use error::Result;
-use job::{BatchJob, BatchJobStatusType, BatchJobType};
+use job::{BatchJob, BatchJobStatus, BatchJobStatusList, BatchJobType};
 use registry::JobRegistry;
 use rustfs_ecstore::store::ECStore;
 use rustfs_ecstore::store_api::StorageAPI;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use store::BatchStore;
 use tracing::{info, warn};
 use uuid::Uuid;
 use worker::worker_count;
 use yaml::BatchJobYaml;
+
+const ENV_JOB_RETENTION_DAYS: &str = "RUSTFS_BATCH_JOB_RETENTION_DAYS";
+const DEFAULT_JOB_RETENTION_DAYS: u64 = 3;
+
+fn job_retention() -> Duration {
+    let days = std::env::var(ENV_JOB_RETENTION_DAYS)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_JOB_RETENTION_DAYS);
+    Duration::from_hours(days * 24)
+}
 
 /// Global batch service instance, initialized once during startup.
 static GLOBAL_BATCH_SERVICE: OnceLock<Arc<BatchService<ECStore>>> = OnceLock::new();
@@ -142,17 +153,39 @@ impl<S: StorageAPI + 'static> BatchService<S> {
         self.registry.cancel(job_id).await
     }
 
-    /// Get status of a job.
-    pub async fn job_status(&self, job_id: &str) -> Result<job::BatchJobStatus> {
+    /// Get status of a specific job by ID. Finds active and retained terminal jobs.
+    pub async fn job_status(&self, job_id: &str) -> Result<BatchJobStatus> {
         let snapshot = self
             .registry
             .get_active_job_snapshot(job_id)
             .await
             .ok_or_else(|| error::BatchError::JobNotFound(job_id.to_owned()))?;
 
-        Ok(job::BatchJobStatus {
+        Ok(BatchJobStatus {
             last_metric: snapshot.to_job_metric(),
         })
+    }
+
+    /// Get the status of the most recently created in-progress job.
+    /// Returns `None` if no active jobs exist.
+    pub async fn job_status_last_active(&self) -> Option<BatchJobStatus> {
+        let snapshot = self.registry.get_last_active_job_snapshot().await?;
+        Some(BatchJobStatus {
+            last_metric: snapshot.to_job_metric(),
+        })
+    }
+
+    /// Get status of all jobs within the retention window.
+    pub async fn job_status_all(&self) -> BatchJobStatusList {
+        let snapshots = self.registry.get_all_job_snapshots().await;
+        BatchJobStatusList {
+            statuses: snapshots
+                .into_iter()
+                .map(|s| BatchJobStatus {
+                    last_metric: s.to_job_metric(),
+                })
+                .collect(),
+        }
     }
 
     /// Get the original YAML definition for a job.
@@ -160,9 +193,14 @@ impl<S: StorageAPI + 'static> BatchService<S> {
         self.store.load_definition(job_id).await
     }
 
-    /// List jobs, optionally filtered by type and/or bucket.
-    pub async fn list_jobs(&self, job_type: Option<&str>) -> job::ListBatchJobsResult {
-        self.registry.list_jobs(job_type).await
+    /// List jobs filtered by type, status, and/or bucket (src or target).
+    pub async fn list_jobs(
+        &self,
+        job_type: Option<&str>,
+        status: Option<&str>,
+        bucket: Option<&str>,
+    ) -> job::ListBatchJobsResult {
+        self.registry.list_jobs(job_type, status, bucket).await
     }
 }
 
@@ -231,27 +269,21 @@ async fn init_batch_service_generic<S: StorageAPI + 'static>(ecstore: Arc<S>) ->
         });
     }
 
-    // Clean up old completed jobs (older than 3 days, matching MinIO behaviour).
-    clean_old_jobs_generic(&service).await;
-
-    service
-}
-
-async fn clean_old_jobs_generic<S: StorageAPI + 'static>(service: &BatchService<S>) {
-    let cutoff = Utc::now() - chrono::Duration::days(3);
-    let ids = service.store.list_job_ids().await;
-    for id in ids {
-        if let Ok(job) = service.store.load_job(&id).await {
-            let is_terminal = matches!(
-                job.status,
-                BatchJobStatusType::Completed | BatchJobStatusType::Failed | BatchJobStatusType::Cancelled
-            );
-            let is_old = job.finished_at.map_or(false, |t| t < cutoff);
-            if is_terminal && is_old {
-                info!(job_id = %id, "batch: cleaning up old job");
-                // We don't have delete_config exposed; for now just log.
-                // A future cleanup pass can use delete_config from ecstore::config::com.
+    // Spawn background eviction loop, removes registry entries older than retention window.
+    let retention = job_retention();
+    let registry_weak = Arc::downgrade(&service.registry);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            match registry_weak.upgrade() {
+                Some(reg) => {
+                    reg.evict_expired(retention).await;
+                }
+                None => break,
             }
         }
-    }
+    });
+
+    service
 }

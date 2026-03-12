@@ -92,6 +92,16 @@ async fn test_registry_lifecycle() {
     registry
         .unregister("j1", None, "bucket-src", Some("https://remote.example.com:9000"), "bucket-dst")
         .await;
+    // Entry remains in registry until eviction (so it appears in list/status for the retention window).
+    assert!(registry.get_job("j1").await.is_some());
+    // But a new job with the same src+target can now be registered (dedup lock is released).
+    let j2 = make_job("j2", "bucket-src", "bucket-dst");
+    registry
+        .register(j2, None, "bucket-src", Some("https://remote.example.com:9000"), "bucket-dst", 4)
+        .await
+        .expect("re-register after unregister");
+    // Eviction removes the old terminal entry.
+    registry.evict_expired(std::time::Duration::from_secs(0)).await;
     assert!(registry.get_job("j1").await.is_none());
 }
 
@@ -143,12 +153,12 @@ async fn test_list_jobs_returns_all() {
             .expect("register");
     }
 
-    let result = registry.list_jobs(None).await;
+    let result = registry.list_jobs(None, None, None).await;
     assert_eq!(result.jobs.len(), 3);
 
-    let result_filtered = registry.list_jobs(Some("replicate")).await;
+    let result_filtered = registry.list_jobs(Some("replicate"), None, None).await;
     assert_eq!(result_filtered.jobs.len(), 3);
 
-    let result_empty = registry.list_jobs(Some("keyrotate")).await;
+    let result_empty = registry.list_jobs(Some("keyrotate"), None, None).await;
     assert_eq!(result_empty.jobs.len(), 0);
 }

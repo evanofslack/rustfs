@@ -157,8 +157,10 @@ impl Operation for ListBatchJobsHandler {
 
         let params = extract_query_params(&req.uri);
         let job_type = params.get("jobType").map(|s| s.as_str());
+        let status = params.get("status").map(|s| s.as_str());
+        let bucket = params.get("bucket").map(|s| s.as_str());
 
-        let result = svc.list_jobs(job_type).await;
+        let result = svc.list_jobs(job_type, status, bucket).await;
         json_response(result)
     }
 }
@@ -178,10 +180,22 @@ impl Operation for BatchJobStatusHandler {
         };
 
         let params = extract_query_params(&req.uri);
+
+        // ?all=true — return all jobs in the retention window as an array.
+        if params.get("all").map(|v| v == "true").unwrap_or(false) {
+            let result = svc.job_status_all().await;
+            return json_response(result);
+        }
+
+        // No jobId — return the most recently created active job (if any).
         let Some(job_id) = params.get("jobId") else {
-            return Err(s3_error!(InvalidRequest, "jobId query parameter is required"));
+            match svc.job_status_last_active().await {
+                Some(status) => return json_response(status),
+                None => return Err(S3Error::with_message(S3ErrorCode::NoSuchKey, "no active batch job found".to_string())),
+            }
         };
 
+        // Specific jobId — find in registry (active or retained terminal).
         match svc.job_status(job_id).await {
             Ok(status) => json_response(status),
             Err(rustfs_batch::error::BatchError::JobNotFound(_)) => {
