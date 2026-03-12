@@ -60,7 +60,6 @@ pub fn set_global_batch_service(svc: Arc<BatchService<ECStore>>) {
     let _ = GLOBAL_BATCH_SERVICE.set(svc);
 }
 
-/// Global batch service state.
 pub struct BatchService<S: StorageAPI> {
     pub registry: Arc<JobRegistry>,
     pub store: Arc<BatchStore<S>>,

@@ -146,7 +146,7 @@ impl<S: StorageAPI> BatchStore<S> {
     /// Uses `list_objects_v2` with a `/` delimiter to enumerate subdirectory names.
     pub async fn list_job_ids(&self) -> Vec<String> {
         use rustfs_ecstore::disk::RUSTFS_META_BUCKET;
-        use rustfs_ecstore::store_api::ListOperations;
+        // use rustfs_ecstore::store_api::ListOperations;
 
         let prefix = format!("{BATCH_JOBS_PREFIX}/");
         match self
