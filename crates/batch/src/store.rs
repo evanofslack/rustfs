@@ -127,7 +127,7 @@ impl<S: StorageAPI> BatchStore<S> {
             }
             match serde_json::from_slice::<FailureRecord>(line) {
                 Ok(r) => records.push(r),
-                Err(e) => warn!("batch: skipping malformed failure record: {e}"),
+                Err(e) => warn!("skipping malformed batch job failure record: {e}"),
             }
         }
         Ok(records)
@@ -165,7 +165,7 @@ impl<S: StorageAPI> BatchStore<S> {
                 .collect(),
             Err(e) => {
                 // Not found / not initialized yet is normal on first startup.
-                warn!("batch: failed to list job IDs (this is normal on first startup): {e}");
+                warn!("failed to list batch job IDs (this is normal on first startup): {e}");
                 vec![]
             }
         }

@@ -36,7 +36,7 @@ use rustfs_ecstore::store_api::{ObjectOptions, PutObjReader, StorageAPI};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const DEFAULT_WORKER_COUNT: usize = 4;
 const ENV_WORKER_COUNT: &str = "RUSTFS_BATCH_REPLICATION_WORKERS";
@@ -72,7 +72,7 @@ pub async fn run_replicate_job_arc<S: StorageAPI + 'static>(
     let target_endpoint = config.target.endpoint.clone();
     let target_bucket = config.target.bucket.clone();
 
-    info!(job_id = %job_id, "batch: starting replication job");
+    info!(job_id = %job_id, "starting batch replication job");
 
     // Mark job as started.
     {
@@ -80,7 +80,7 @@ pub async fn run_replicate_job_arc<S: StorageAPI + 'static>(
         updated.started_at = Some(Utc::now());
         registry.update_job_snapshot(&job_id, updated.clone()).await;
         if let Err(e) = store.save_job(&updated).await {
-            error!(job_id = %job_id, "batch: failed to save start state: {e}");
+            error!(job_id = %job_id, "fail save batch job start state: {e}");
         }
     }
 
@@ -97,15 +97,15 @@ pub async fn run_replicate_job_arc<S: StorageAPI + 'static>(
 
     let final_status = match result {
         Ok(()) => {
-            info!(job_id = %job_id, "batch: job completed successfully");
+            info!(job_id = %job_id, "batch job completed successfully");
             BatchJobStatusType::Completed
         }
         Err(BatchError::JobCancelled) => {
-            info!(job_id = %job_id, "batch: job was cancelled");
+            info!(job_id = %job_id, "batch job cancelled");
             BatchJobStatusType::Cancelled
         }
         Err(e) => {
-            error!(job_id = %job_id, "batch: job failed: {e}");
+            error!(job_id = %job_id, "batch job failed: {e}");
             BatchJobStatusType::Failed
         }
     };
@@ -116,7 +116,7 @@ pub async fn run_replicate_job_arc<S: StorageAPI + 'static>(
         snapshot.status = final_status;
         snapshot.finished_at = Some(Utc::now());
         if let Err(e) = store.save_job(&snapshot).await {
-            error!(job_id = %job_id, "batch: failed to persist final state: {e}");
+            error!(job_id = %job_id, "fail persist final batch job state: {e}");
         }
     }
 
@@ -173,7 +173,7 @@ async fn run_replication_passes<S: StorageAPI + 'static>(
             job_id = %job.id,
             attempt = attempt + 1,
             failure_count = failures.len(),
-            "batch: retrying failed objects"
+            "retrying failed batch objects"
         );
 
         tokio::time::sleep(retry_delay).await;
@@ -197,7 +197,7 @@ async fn run_replication_passes<S: StorageAPI + 'static>(
     let remaining = store.load_failures(&job.id).await?;
     if !remaining.is_empty() {
         return Err(BatchError::Transfer(format!(
-            "{} objects failed after {} retries",
+            "batch job finished with {} failed objects after {} retries",
             remaining.len(),
             max_retries
         )));
@@ -228,6 +228,13 @@ async fn enumerate_and_transfer<S: StorageAPI + 'static>(
     let source_prefix = config.source.prefix.clone().unwrap_or_default();
     let target_prefix = config.target.prefix.clone().unwrap_or_default();
 
+    debug!(
+        job_id = job_id,
+        bucket_source = source_bucket,
+        bucket_target = target_bucket,
+        "start batch replicate objects"
+    );
+
     let mut continuation_token = resume_token;
 
     loop {
@@ -248,6 +255,13 @@ async fn enumerate_and_transfer<S: StorageAPI + 'static>(
 
         continuation_token = more;
 
+        debug!(
+            job_id = job_id,
+            object_count = items.len(),
+            bucket_source = source_bucket,
+            bucket_target = target_bucket,
+            "satch replicate object page"
+        );
         for item in items {
             if control.cancel.is_cancelled() {
                 return Err(BatchError::JobCancelled);
@@ -258,6 +272,13 @@ async fn enumerate_and_transfer<S: StorageAPI + 'static>(
                 check_target_exists(target_client, ecstore.clone(), &target_bucket, &target_key, item.etag.as_deref()).await;
 
             if already_exists {
+                debug!(
+                    job_id = job_id,
+                    key = item.key,
+                    bucket_source = source_bucket,
+                    bucket_target = &target_bucket,
+                    "object already exists in target, skipping"
+                );
                 counters.inc_success(0);
                 continue;
             }
@@ -275,9 +296,23 @@ async fn enumerate_and_transfer<S: StorageAPI + 'static>(
             )
             .await
             {
-                Ok(bytes) => counters.inc_success(bytes),
+                Ok(bytes) => {
+                    debug!(
+                        job_id = job_id,
+                        key = item.key,
+                        bucket_source = source_bucket,
+                        bucket_target = &target_bucket,
+                        "success replicate object"
+                    );
+                    counters.inc_success(bytes);
+                }
                 Err(e) => {
-                    warn!(job_id = %job_id, key = %item.key, "batch: transfer failed: {e}");
+                    warn!(
+                        job_id = job_id,
+                        key = %item.key, 
+                        bucket_source = source_bucket,
+                        bucket_target = &target_bucket,
+                         "failure replicate object: {e}");
                     counters.inc_failure(item.size);
                     let rec = FailureRecord {
                         key: item.key.clone(),
@@ -287,7 +322,7 @@ async fn enumerate_and_transfer<S: StorageAPI + 'static>(
                         size: item.size,
                     };
                     if let Err(se) = store.append_failure(&job_id, &rec).await {
-                        error!(job_id = %job_id, "batch: failed to write failure record: {se}");
+                        error!(job_id = job_id, "fail write failure record: {se}");
                     }
                 }
             }
@@ -304,7 +339,18 @@ async fn enumerate_and_transfer<S: StorageAPI + 'static>(
             snapshot.last_persisted_at = Some(Utc::now());
             registry.update_job_snapshot(&job_id, snapshot.clone()).await;
             if let Err(e) = store.save_job(&snapshot).await {
-                warn!(job_id = %job_id, "batch: progress persist failed: {e}");
+                warn!(job_id = job_id, "fail persist batch job progress: {e}");
+            } else {
+                debug!(
+                    job_id = job_id,
+                    bucket_source = source_bucket,
+                    bucket_target = &target_bucket,
+                    objects,
+                    objects_failed,
+                    bytes_transferred,
+                    bytes_failed,
+                    "success persist batch job progress"
+                );
             }
         }
 
@@ -422,7 +468,16 @@ async fn retry_failures<S: StorageAPI + 'static>(
         )
         .await
         {
-            Ok(bytes) => counters.inc_success(bytes),
+            Ok(bytes) => {
+                debug!(
+                    job_id = job.id,
+                    key = rec.key,
+                    bucket_source = source_bucket,
+                    bucket_target = &target_bucket,
+                    "success retry replicate object"
+                );
+                counters.inc_success(bytes);
+            }
             Err(e) => {
                 counters.inc_failure(rec.size);
                 let new_rec = FailureRecord {
@@ -433,7 +488,7 @@ async fn retry_failures<S: StorageAPI + 'static>(
                     size: rec.size,
                 };
                 if let Err(se) = store.append_failure(&job.id, &new_rec).await {
-                    error!(job_id = %job.id, "batch: failed to write retry failure record: {se}");
+                    error!(job_id = job.id, "fail write retry failure record: {se}");
                 }
             }
         }
@@ -463,7 +518,7 @@ async fn check_target_exists<S: StorageAPI + 'static>(
             Ok(Some(head)) => source_etag.map_or(true, |se| head.etag.as_deref() == Some(se)),
             Ok(None) => false,
             Err(e) => {
-                warn!("batch: HEAD target failed for {target_key}: {e}");
+                warn!("Head target failed for {target_key}: {e}");
                 false
             }
         }

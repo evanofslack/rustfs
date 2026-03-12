@@ -144,7 +144,7 @@ impl<S: StorageAPI + 'static> BatchService<S> {
             worker::run_replicate_job_arc(job, config, store, ecstore, registry, control, counters).await;
         });
 
-        info!(job_id = %job_id, "batch: job submitted");
+        info!(job_id = %job_id, "batch job submitted");
         Ok(result)
     }
 
@@ -220,20 +220,20 @@ async fn init_batch_service_generic<S: StorageAPI + 'static>(ecstore: Arc<S>) ->
     let jobs_to_resume = service.registry.load_from_store(&*service.store).await;
 
     for job in jobs_to_resume {
-        info!(job_id = %job.id, "batch: resuming interrupted job");
+        info!(job_id = %job.id, "resuming interrupted batch job");
 
         // Load the YAML definition to reconstruct the config.
         let yaml_str = match service.store.load_definition(&job.id).await {
             Ok(s) => s,
             Err(e) => {
-                warn!(job_id = %job.id, "batch: cannot load definition for resume: {e}");
+                warn!(job_id = %job.id, "cannot load batch job definition for resume: {e}");
                 continue;
             }
         };
         let job_def = match BatchJobYaml::from_yaml_str(&yaml_str) {
             Ok(d) => d,
             Err(e) => {
-                warn!(job_id = %job.id, "batch: cannot parse definition for resume: {e}");
+                warn!(job_id = %job.id, "cannot parse batch job definition for resume: {e}");
                 continue;
             }
         };
@@ -256,7 +256,7 @@ async fn init_batch_service_generic<S: StorageAPI + 'static>(ecstore: Arc<S>) ->
         {
             Ok(pair) => pair,
             Err(e) => {
-                warn!(job_id = %job.id, "batch: cannot register for resume: {e}");
+                warn!(job_id = %job.id, "cannot register batch job for resume: {e}");
                 continue;
             }
         };

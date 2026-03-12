@@ -253,7 +253,7 @@ impl JobRegistry {
         for id in job_ids {
             match store.load_job(&id).await {
                 Ok(job) => {
-                    info!("batch: recovered job {id} status={}", job.status);
+                    info!(job_id = id, status = ?job.status, "recovered batch job from store");
                     if job.status == BatchJobStatusType::InProgress {
                         to_resume.push(job.clone());
                     }
@@ -269,7 +269,7 @@ impl JobRegistry {
                         },
                     );
                 }
-                Err(e) => warn!("batch: failed to load job {id}: {e}"),
+                Err(e) => warn!(job_id = id, "fail load batch job: {e}"),
             }
         }
 
