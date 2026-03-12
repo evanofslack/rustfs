@@ -263,7 +263,7 @@ impl Operation for GenerateBatchJobHandler {
         let job_type = params.get("jobType").map(|s| s.as_str()).unwrap_or("replicate");
 
         match job_type {
-            "replicate" => Ok(S3Response::new((StatusCode::OK, Body::from(REPLICATE_JOB_TEMPLATE.into())))),
+            "replicate" => Ok(S3Response::new((StatusCode::OK, Body::from(REPLICATE_JOB_TEMPLATE.to_string())))),
             other => Err(S3Error::with_message(
                 S3ErrorCode::InvalidArgument,
                 format!("unsupported jobType: {other}"),
