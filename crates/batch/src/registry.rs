@@ -165,7 +165,7 @@ impl JobRegistry {
     }
 
     /// Load completed/failed/cancelled jobs from disk into registry for listing.
-    /// In-progress jobs are re-queued for resumption.
+    /// Returns in-progress jobs, so they can be resumed.
     pub async fn load_from_store<S: StorageAPI>(&self, store: &BatchStore<S>) -> Vec<BatchJob> {
         let job_ids = store.list_job_ids().await;
         let mut to_resume = Vec::new();
