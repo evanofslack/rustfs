@@ -504,6 +504,7 @@ impl RustFSTestClusterEnvironment {
         }
 
         self.wait_for_service_ready().await?;
+        self.wait_for_iam_ready().await?;
 
         Ok(())
     }
@@ -542,6 +543,41 @@ impl RustFSTestClusterEnvironment {
             }
         }
         Err("Cluster service failed to become ready".into())
+    }
+
+    /// Wait for IAM to be initialized on every cluster node (internal helper method).
+    ///
+    /// Polls `GET /health/ready` on each node until it returns `200 OK`.
+    /// That endpoint checks `IamCache::is_ready()` — the same atomic flag that
+    /// `rustfs_iam::get()` checks — and returns `503` until both storage and IAM
+    /// are fully initialized. It requires no `Authorization` header and has no
+    /// short-circuit path for the root user, making it a reliable probe.
+    pub async fn wait_for_iam_ready(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        const MAX_ATTEMPTS: u32 = 60;
+        let client = reqwest::Client::new();
+
+        for node in &self.nodes {
+            let url = format!("{}/health/ready", node.url);
+
+            for attempt in 0..MAX_ATTEMPTS {
+                match client.get(&url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        info!("IAM ready on {} after {} attempts", node.address, attempt + 1);
+                        break;
+                    }
+                    Ok(_) | Err(_) => {
+                        if attempt + 1 == MAX_ATTEMPTS {
+                            return Err(
+                                format!("IAM not initialized on {} after {}s", node.address, MAX_ATTEMPTS).into()
+                            );
+                        }
+                        sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Create an S3 client configured to communicate with a specific cluster node.

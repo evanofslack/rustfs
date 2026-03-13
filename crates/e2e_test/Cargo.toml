@@ -26,6 +26,7 @@ workspace = true
 [features]
 default = []
 ftps = []
+batch-operations = []
 
 [dependencies]
 rustfs-ecstore.workspace = true

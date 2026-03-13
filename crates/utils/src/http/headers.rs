@@ -183,6 +183,11 @@ pub const RUSTFS_BUCKET_REPLICATION_REQUEST: &str = "X-Rustfs-Source-Replication
 pub const RUSTFS_BUCKET_REPLICATION_CHECK: &str = "X-Rustfs-Source-Replication-Check";
 pub const RUSTFS_BUCKET_REPLICATION_SSEC_CHECKSUM: &str = "X-Rustfs-Source-Replication-Ssec-Crc";
 
+/// Sentinel header added to all inter-node batch fan-out requests.
+/// When a node receives a request carrying this header it must serve only its
+/// local data and must NOT fan-out further, preventing infinite proxy loops.
+pub const RUSTFS_BATCH_PROXY_REQUEST: &str = "X-Rustfs-Proxy-Request";
+
 // SSEC encryption header constants
 pub const SSEC_ALGORITHM_HEADER: &str = "x-amz-server-side-encryption-customer-algorithm";
 pub const SSEC_KEY_HEADER: &str = "x-amz-server-side-encryption-customer-key";

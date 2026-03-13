@@ -29,18 +29,15 @@
 pub mod client;
 pub mod error;
 pub mod job;
-pub mod peer_client;
 pub mod registry;
 pub mod store;
 pub mod worker;
 pub mod yaml;
 
 use error::Result;
-use job::{BatchJob, BatchJobStatus, BatchJobStatusList, BatchJobType};
-use peer_client::PeerClientPool;
+use job::{BatchJob, BatchJobType};
 use registry::JobRegistry;
 use rustfs_common::get_global_local_node_name;
-use rustfs_ecstore::global::get_global_endpoints;
 use rustfs_ecstore::store::ECStore;
 use rustfs_ecstore::store_api::StorageAPI;
 use std::sync::{Arc, OnceLock};
@@ -76,8 +73,9 @@ async fn make_job_id(job_type: &BatchJobType) -> String {
     }
 }
 
-/// Extract the owner node address from a job ID, or `None` for single-node IDs.
-fn parse_owner_node(job_id: &str) -> Option<&str> {
+/// Extract the owner node address (`host:port`) from a job ID, or `None` for single-node IDs.
+/// Format: `<jobtype>-<uuid>|<host:port>` → returns the `<host:port>` part.
+pub fn parse_owner_node(job_id: &str) -> Option<&str> {
     job_id.split_once('|').map(|(_, node)| node)
 }
 
@@ -98,7 +96,6 @@ pub struct BatchService<S: StorageAPI> {
     pub registry: Arc<JobRegistry>,
     pub store: Arc<BatchStore<S>>,
     pub ecstore: Arc<S>,
-    peers: Arc<PeerClientPool>,
 }
 
 impl<S: StorageAPI + 'static> BatchService<S> {
@@ -107,26 +104,7 @@ impl<S: StorageAPI + 'static> BatchService<S> {
             registry: Arc::new(JobRegistry::new()),
             store: Arc::new(BatchStore::new(ecstore.clone())),
             ecstore,
-            peers: Arc::new(PeerClientPool::new()),
         }
-    }
-
-    /// Returns true when the job was started on this node and its in-memory state
-    /// lives in our registry. Returns false when the job must be forwarded to the
-    /// owner node encoded in the job ID.
-    async fn is_local_job(&self, job_id: &str) -> bool {
-        match parse_owner_node(job_id) {
-            None => true,
-            Some(owner) => {
-                let local = get_global_local_node_name().await;
-                local.is_empty() || owner == local
-            }
-        }
-    }
-
-    /// Build the base URL for the node that owns this job.
-    fn owner_base_url(job_id: &str) -> Option<String> {
-        parse_owner_node(job_id).map(|node| format!("http://{node}"))
     }
 
     /// Start a new batch job from YAML definition bytes.
@@ -185,193 +163,58 @@ impl<S: StorageAPI + 'static> BatchService<S> {
         Ok(result)
     }
 
-    /// Cancel a running job. If the job was started on another node, the request is
-    /// forwarded to that node so it can signal the in-memory cancellation token.
+    /// Cancel a running job. Forwarding to the owner node is handled at the HTTP handler layer.
     pub async fn cancel_job(&self, job_id: &str) -> Result<()> {
-        if self.is_local_job(job_id).await {
-            return self.registry.cancel(job_id).await;
-        }
-        let base_url = Self::owner_base_url(job_id).expect("non-local job must have owner node");
-        self.peers.get(&base_url).await.cancel_job(job_id).await
+        self.registry.cancel(job_id).await
     }
 
-    /// Get status of a specific job by ID. Forwarded to the owner node if needed.
-    pub async fn job_status(&self, job_id: &str) -> Result<BatchJobStatus> {
-        if self.is_local_job(job_id).await {
-            let snapshot = self
-                .registry
-                .get_active_job_snapshot(job_id)
-                .await
-                .ok_or_else(|| error::BatchError::JobNotFound(job_id.to_owned()))?;
-            return Ok(BatchJobStatus {
-                last_metric: snapshot.to_job_metric(),
-            });
-        }
-        let base_url = Self::owner_base_url(job_id).expect("non-local job must have owner node");
-        self.peers.get(&base_url).await.job_status(job_id).await
+    /// Get status of a specific job by ID. Forwarding to the owner node is handled at the HTTP handler layer.
+    pub async fn job_status(&self, job_id: &str) -> Result<job::BatchJobStatus> {
+        let snapshot = self
+            .registry
+            .get_active_job_snapshot(job_id)
+            .await
+            .ok_or_else(|| error::BatchError::JobNotFound(job_id.to_owned()))?;
+        Ok(job::BatchJobStatus {
+            last_metric: snapshot.to_job_metric(),
+        })
     }
 
-    /// Get the status of the most recently created in-progress job across all nodes.
-    pub async fn job_status_last_active(&self) -> Option<BatchJobStatus> {
-        let local = self.registry.get_last_active_job_snapshot().await.map(|s| BatchJobStatus {
+    /// Get the status of the most recently created in-progress job on this node.
+    pub async fn job_status_last_active(&self) -> Option<job::BatchJobStatus> {
+        self.registry.get_last_active_job_snapshot().await.map(|s| job::BatchJobStatus {
             last_metric: s.to_job_metric(),
-        });
-
-        let peer_results = self.fan_out_status_all().await;
-
-        // Combine local + peer results; pick the one with the latest start time.
-        let mut candidates: Vec<BatchJobStatus> = peer_results.into_iter().flat_map(|r| r.statuses).collect();
-        if let Some(l) = local {
-            candidates.push(l);
-        }
-
-        candidates.into_iter().max_by_key(|s| s.last_metric.start_time)
+        })
     }
 
-    /// Get status of all jobs within the retention window across all nodes.
-    pub async fn job_status_all(&self) -> BatchJobStatusList {
-        let mut statuses: Vec<BatchJobStatus> = self
+    /// Get status of all jobs within the retention window on this node.
+    pub async fn job_status_all(&self) -> job::BatchJobStatusList {
+        let statuses = self
             .registry
             .get_all_job_snapshots()
             .await
             .into_iter()
-            .map(|s| BatchJobStatus {
+            .map(|s| job::BatchJobStatus {
                 last_metric: s.to_job_metric(),
             })
             .collect();
-
-        for peer_list in self.fan_out_status_all().await {
-            statuses.extend(peer_list.statuses);
-        }
-
-        BatchJobStatusList { statuses }
+        job::BatchJobStatusList { statuses }
     }
 
-    /// Get the original YAML definition for a job. Forwarded to owner node if needed.
+    /// Get the original YAML definition for a job on this node. Forwarding is handled at the HTTP handler layer.
     pub async fn describe_job(&self, job_id: &str) -> Result<String> {
-        if self.is_local_job(job_id).await {
-            return self.store.load_definition(job_id).await;
-        }
-        let base_url = Self::owner_base_url(job_id).expect("non-local job must have owner node");
-        self.peers.get(&base_url).await.describe_job(job_id).await
+        self.store.load_definition(job_id).await
     }
 
-    /// List jobs filtered by type, status, and/or bucket across all nodes.
+    /// List jobs on this node filtered by type, status, and/or bucket.
+    /// Cross-node fan-out is handled at the HTTP handler layer.
     pub async fn list_jobs(
         &self,
         job_type: Option<&str>,
         status: Option<&str>,
         bucket: Option<&str>,
     ) -> job::ListBatchJobsResult {
-        let mut jobs = self.registry.list_jobs(job_type, status, bucket).await.jobs;
-
-        let peer_lists = self.fan_out_list_jobs(job_type, status, bucket).await;
-        for peer_result in peer_lists {
-            jobs.extend(peer_result.jobs);
-        }
-
-        job::ListBatchJobsResult { jobs }
-    }
-
-    /// Fan-out a status-all request to all non-local peer nodes concurrently.
-    /// Errors from individual peers are logged and skipped (best-effort).
-    async fn fan_out_status_all(&self) -> Vec<BatchJobStatusList> {
-        let peer_base_urls = self.non_local_peer_base_urls().await;
-        if peer_base_urls.is_empty() {
-            return vec![];
-        }
-
-        let peers = self.peers.clone();
-        let handles: Vec<_> = peer_base_urls
-            .into_iter()
-            .map(|url| {
-                let peers = peers.clone();
-                tokio::spawn(async move {
-                    let client = peers.get(&url).await;
-                    match client.job_status_all().await {
-                        Ok(list) => Some(list),
-                        Err(e) => {
-                            warn!(peer = %url, "fan-out job_status_all failed: {e}");
-                            None
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        let mut results = Vec::new();
-        for h in handles {
-            if let Ok(Some(list)) = h.await {
-                results.push(list);
-            }
-        }
-        results
-    }
-
-    /// Fan-out a list-jobs request to all non-local peer nodes concurrently.
-    async fn fan_out_list_jobs(
-        &self,
-        job_type: Option<&str>,
-        status: Option<&str>,
-        bucket: Option<&str>,
-    ) -> Vec<job::ListBatchJobsResult> {
-        let peer_base_urls = self.non_local_peer_base_urls().await;
-        if peer_base_urls.is_empty() {
-            return vec![];
-        }
-
-        let peers = self.peers.clone();
-        let jt = job_type.map(str::to_owned);
-        let st = status.map(str::to_owned);
-        let bk = bucket.map(str::to_owned);
-
-        let handles: Vec<_> = peer_base_urls
-            .into_iter()
-            .map(|url| {
-                let peers = peers.clone();
-                let jt = jt.clone();
-                let st = st.clone();
-                let bk = bk.clone();
-                tokio::spawn(async move {
-                    let client = peers.get(&url).await;
-                    match client.list_jobs(jt.as_deref(), st.as_deref(), bk.as_deref()).await {
-                        Ok(r) => Some(r),
-                        Err(e) => {
-                            warn!(peer = %url, "fan-out list_jobs failed: {e}");
-                            None
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        let mut results = Vec::new();
-        for h in handles {
-            if let Ok(Some(r)) = h.await {
-                results.push(r);
-            }
-        }
-        results
-    }
-
-    /// Return HTTP base URLs for all non-local cluster nodes.
-    async fn non_local_peer_base_urls(&self) -> Vec<String> {
-        let local = get_global_local_node_name().await;
-        get_global_endpoints()
-            .get_nodes()
-            .into_iter()
-            .filter(|n| !n.is_local)
-            .map(|n| {
-                let host = n.url.host_str().unwrap_or("");
-                let port = n.url.port().map(|p| format!(":{p}")).unwrap_or_default();
-                let scheme = n.url.scheme();
-                format!("{scheme}://{host}{port}")
-            })
-            .filter(|url| {
-                // Guard against misidentifying self when local node name is set.
-                local.is_empty() || !url.contains(&local)
-            })
-            .collect()
+        self.registry.list_jobs(job_type, status, bucket).await
     }
 }
 

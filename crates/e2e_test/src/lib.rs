@@ -83,3 +83,7 @@ mod checksum_upload_test;
 // Group deletion tests
 #[cfg(test)]
 mod group_delete_test;
+
+// Batch replication E2E tests (requires batch-operations feature)
+#[cfg(all(test, feature = "batch-operations"))]
+mod batch_replication_test;

@@ -603,25 +603,18 @@ async fn stream_transfer_object<S: StorageAPI + 'static>(
     size: i64,
 ) -> Result<i64> {
     match (source_client, target_client) {
-        // Local → Local: server-side copy, no byte movement
+        // Local → Local: read from ECStore, write back to ECStore
         (None, None) => {
-            let mut src_info = ecstore
-                .get_object_info(source_bucket, source_key, &ObjectOptions::default())
+            let reader = ecstore
+                .get_object_reader(source_bucket, source_key, None, HeaderMap::new(), &ObjectOptions::default())
                 .await
                 .map_err(|e| BatchError::Transfer(e.to_string()))?;
 
-            let bytes = src_info.size;
+            let bytes = reader.object_info.size;
+            let mut put_reader = PutObjReader::from_async_read(reader.stream, bytes);
 
             ecstore
-                .copy_object(
-                    source_bucket,
-                    source_key,
-                    target_bucket,
-                    target_key,
-                    &mut src_info,
-                    &ObjectOptions::default(),
-                    &ObjectOptions::default(),
-                )
+                .put_object(target_bucket, target_key, &mut put_reader, &ObjectOptions::default())
                 .await
                 .map_err(|e| BatchError::Transfer(e.to_string()))?;
 
@@ -685,12 +678,6 @@ async fn multipart_transfer_object<S: StorageAPI + 'static>(
     target_key: &str,
     part_count: u32,
 ) -> Result<i64> {
-    // For local→local multipart, fall back to copy_object_part so bytes don't
-    // traverse this process. Individual parts are handled via copy.
-    if source_client.is_none() && target_client.is_none() {
-        return local_to_local_multipart(ecstore, source_bucket, source_key, target_bucket, target_key, part_count).await;
-    }
-
     let upload_id = open_target_multipart(target_client, ecstore.clone(), target_bucket, target_key).await?;
 
     let result = do_multipart_parts(
@@ -889,104 +876,6 @@ async fn put_target_part<S: StorageAPI + 'static>(
     }
 }
 
-/// Server-side multipart copy for local→local transfers.
-/// Uses `copy_object_part` which avoids moving bytes through this process.
-async fn local_to_local_multipart<S: StorageAPI + 'static>(
-    ecstore: Arc<S>,
-    source_bucket: &str,
-    source_key: &str,
-    target_bucket: &str,
-    target_key: &str,
-    part_count: u32,
-) -> Result<i64> {
-    let src_info = ecstore
-        .get_object_info(source_bucket, source_key, &ObjectOptions::default())
-        .await
-        .map_err(|e| BatchError::Transfer(e.to_string()))?;
-
-    let total_size = src_info.size;
-    let parts = src_info.parts.clone();
-
-    // Open multipart upload on target
-    let mp = ecstore
-        .new_multipart_upload(target_bucket, target_key, &ObjectOptions::default())
-        .await
-        .map_err(|e| BatchError::Transfer(e.to_string()))?;
-
-    let upload_id = mp.upload_id.clone();
-
-    let result: Result<Vec<CompletePart>> = async {
-        let mut completed: Vec<CompletePart> = Vec::with_capacity(part_count as usize);
-
-        for part_num in 1..=part_count {
-            // Determine byte range for this part
-            let (start_offset, length) = if parts.is_empty() {
-                // If no part metadata, fall back to full-object copy for single part
-                (0i64, total_size)
-            } else {
-                let idx = (part_num - 1) as usize;
-                if idx >= parts.len() {
-                    return Err(BatchError::Transfer(format!(
-                        "part {part_num} not found in source metadata (only {} parts)",
-                        parts.len()
-                    )));
-                }
-                let mut offset = 0i64;
-                for p in &parts[..idx] {
-                    offset += p.actual_size;
-                }
-                (offset, parts[idx].actual_size)
-            };
-
-            let src_info_ref = &src_info;
-            ecstore
-                .copy_object_part(
-                    source_bucket,
-                    source_key,
-                    target_bucket,
-                    target_key,
-                    &upload_id,
-                    part_num as usize,
-                    start_offset,
-                    length,
-                    src_info_ref,
-                    &ObjectOptions::default(),
-                    &ObjectOptions::default(),
-                )
-                .await
-                .map_err(|e| BatchError::Transfer(e.to_string()))?;
-
-            completed.push(CompletePart {
-                part_num: part_num as usize,
-                etag: None, // ECStore fills this from its internal state
-                checksum_crc32: None,
-                checksum_crc32c: None,
-                checksum_sha1: None,
-                checksum_sha256: None,
-                checksum_crc64nvme: None,
-            });
-        }
-        Ok(completed)
-    }
-    .await;
-
-    match result {
-        Ok(completed_parts) => {
-            ecstore
-                .clone()
-                .complete_multipart_upload(target_bucket, target_key, &upload_id, completed_parts, &ObjectOptions::default())
-                .await
-                .map_err(|e| BatchError::Transfer(e.to_string()))?;
-            Ok(total_size)
-        }
-        Err(e) => {
-            let _ = ecstore
-                .abort_multipart_upload(target_bucket, target_key, &upload_id, &ObjectOptions::default())
-                .await;
-            Err(e)
-        }
-    }
-}
 
 /// Unifies local (`GetObjectReader`) and remote (`ByteStream`) part sources so that
 /// `put_target_part` can consume either without an intermediate buffer.

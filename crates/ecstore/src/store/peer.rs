@@ -136,7 +136,8 @@ pub(super) async fn init_local_peer(endpoint_pools: &EndpointServerPools, host: 
     endpoint_pools.as_ref().iter().for_each(|endpoints| {
         endpoints.endpoints.as_ref().iter().for_each(|endpoint| {
             if endpoint.get_type() == EndpointType::Url && endpoint.is_local && endpoint.url.has_host() {
-                peer_set.push(endpoint.url.host_str().unwrap().to_string());
+                let host = endpoint.url.host_str().unwrap().to_string();
+                peer_set.push(format!("{host}:{port}"));
             }
         });
     });
