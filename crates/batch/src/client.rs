@@ -23,7 +23,7 @@ use crate::yaml::EndpointYaml;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::config::{BehaviorVersion, Credentials as SdkCredentials, Region as SdkRegion};
 use aws_sdk_s3::primitives::ByteStream;
-use bytes::Bytes;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use std::collections::HashMap;
 
 /// A page of listed objects returned from a remote bucket.
@@ -142,8 +142,10 @@ impl BatchS3Client {
         }
     }
 
-    /// GET an object, returning its bytes and size.
-    pub async fn get_object(&self, key: &str) -> Result<(Bytes, i64)> {
+    /// GET an object, returning a streaming `ByteStream` and the declared content-length.
+    /// The body is not buffered; callers must consume the stream without holding it across
+    /// `.await` points that might cancel it.
+    pub async fn get_object_stream(&self, key: &str) -> Result<(ByteStream, i64)> {
         let output = self
             .client
             .get_object()
@@ -154,21 +156,35 @@ impl BatchS3Client {
             .map_err(|e| BatchError::S3Client(e.to_string()))?;
 
         let size = output.content_length().unwrap_or(0);
-        let body = output
-            .body
-            .collect()
-            .await
-            .map_err(|e| BatchError::Transfer(e.to_string()))?
-            .into_bytes();
-
-        Ok((body, size))
+        Ok((output.body, size))
     }
 
-    /// PUT an object from bytes.
-    pub async fn put_object(&self, key: &str, body: Bytes, metadata: HashMap<String, String>) -> Result<()> {
-        let size = body.len() as i64;
-        let stream = ByteStream::from(body);
+    /// GET a single part of a multipart object by its 1-based part number.
+    /// Returns the part's `ByteStream` and the declared content-length for that part.
+    /// Only valid for objects whose ETag contains a `-N` suffix.
+    pub async fn get_object_part_stream(&self, key: &str, part_number: u32) -> Result<(ByteStream, i64)> {
+        let output = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .part_number(part_number as i32)
+            .send()
+            .await
+            .map_err(|e| BatchError::S3Client(e.to_string()))?;
 
+        let size = output.content_length().unwrap_or(0);
+        Ok((output.body, size))
+    }
+
+    /// PUT an object from a `ByteStream` of known `size`.
+    pub async fn put_object_stream(
+        &self,
+        key: &str,
+        stream: ByteStream,
+        size: i64,
+        metadata: HashMap<String, String>,
+    ) -> Result<()> {
         let mut req = self
             .client
             .put_object()
@@ -182,7 +198,88 @@ impl BatchS3Client {
         }
 
         req.send().await.map_err(|e| BatchError::S3Client(e.to_string()))?;
+        Ok(())
+    }
 
+    /// Initiate a multipart upload. Returns the upload ID.
+    pub async fn create_multipart_upload(&self, key: &str) -> Result<String> {
+        let output = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| BatchError::S3Client(e.to_string()))?;
+
+        output
+            .upload_id()
+            .map(|s| s.to_owned())
+            .ok_or_else(|| BatchError::S3Client("create_multipart_upload returned no upload_id".into()))
+    }
+
+    /// Upload one part. Returns the ETag for that part (needed for `complete_multipart_upload`).
+    pub async fn upload_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: u32,
+        stream: ByteStream,
+        size: i64,
+    ) -> Result<String> {
+        let output = self
+            .client
+            .upload_part()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .part_number(part_number as i32)
+            .content_length(size)
+            .body(stream)
+            .send()
+            .await
+            .map_err(|e| BatchError::S3Client(e.to_string()))?;
+
+        output
+            .e_tag()
+            .map(|s| s.to_owned())
+            .ok_or_else(|| BatchError::S3Client("upload_part returned no ETag".into()))
+    }
+
+    /// Complete a multipart upload. `parts` is a list of `(1-based part number, etag)` pairs
+    /// in ascending part-number order.
+    pub async fn complete_multipart_upload(&self, key: &str, upload_id: &str, parts: Vec<(i32, String)>) -> Result<()> {
+        let completed_parts: Vec<CompletedPart> = parts
+            .into_iter()
+            .map(|(num, etag)| CompletedPart::builder().part_number(num).e_tag(etag).build())
+            .collect();
+
+        let completed = CompletedMultipartUpload::builder().set_parts(Some(completed_parts)).build();
+
+        self.client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .multipart_upload(completed)
+            .send()
+            .await
+            .map_err(|e| BatchError::S3Client(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Abort an in-progress multipart upload. Should be called on transfer error to avoid
+    /// orphaned partial uploads consuming storage.
+    pub async fn abort_multipart_upload(&self, key: &str, upload_id: &str) -> Result<()> {
+        self.client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .send()
+            .await
+            .map_err(|e| BatchError::S3Client(e.to_string()))?;
         Ok(())
     }
 }

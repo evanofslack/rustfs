@@ -40,6 +40,27 @@ impl PutObjReader {
         }
     }
 
+    /// Wrap an `AsyncRead` stream of known `size` without buffering the body into memory.
+    ///
+    /// `size` must be the exact number of bytes that `reader` will yield. Passing an incorrect
+    /// size will cause the upload to be rejected or silently truncated by the storage layer.
+    pub fn from_async_read<R>(reader: R, size: i64) -> Self
+    where
+        R: AsyncRead + Unpin + Send + Sync + 'static,
+    {
+        PutObjReader {
+            stream: HashReader::new(
+                Box::new(WarpReader::new(reader)),
+                size,
+                size,
+                None,
+                None,
+                false,
+            )
+            .expect("HashReader::new is infallible for a fresh reader with no pre-set checksums"),
+        }
+    }
+
     pub fn size(&self) -> i64 {
         self.stream.size()
     }

@@ -18,9 +18,12 @@
 //!  1. An enumerator lists source objects (remote via AWS SDK or local via ECStore).
 //!  2. Objects are fanned out to N concurrent transfers via a semaphore.
 //!  3. Each slot HEADs the target; if the object is already there with a matching
-//!     ETag, it is skipped. Otherwise it is GET→PUT transferred.
-//!  4. Failures are appended to `failures.jsonl`.
-//!  5. After enumeration, if failures remain and retries are configured, the
+//!     ETag, it is skipped. Otherwise it is transferred.
+//!  4. Single-part objects are streamed directly (GET → PUT, no full-body buffer).
+//!  5. Multipart objects (ETag contains "-N" suffix) are transferred part-by-part,
+//!     preserving the original part boundaries.
+//!  6. Failures are appended to `failures.jsonl`.
+//!  7. After enumeration, if failures remain and retries are configured, the
 //!     failures file is replayed, then cleared on success.
 
 use crate::client::{BatchS3Client, ListedObject};
@@ -29,13 +32,18 @@ use crate::job::{BatchJob, BatchJobStatusType, JobControl, JobCounters};
 use crate::registry::JobRegistry;
 use crate::store::{BatchStore, FailureRecord};
 use crate::yaml::{FilterYaml, ReplicateJobYaml};
-use bytes::Bytes;
+use aws_sdk_s3::primitives::ByteStream;
+use aws_smithy_types::body::SdkBody;
 use chrono::Utc;
+use futures_util::StreamExt as _;
 use http::HeaderMap;
-use rustfs_ecstore::store_api::{ObjectOptions, PutObjReader, StorageAPI};
+use http_body::Frame;
+use http_body_util::StreamBody;
+use rustfs_ecstore::store_api::{CompletePart, ObjectOptions, PutObjReader, StorageAPI};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::io::ReaderStream;
 use tracing::{debug, error, info, warn};
 
 const DEFAULT_WORKER_COUNT: usize = 4;
@@ -54,6 +62,16 @@ struct WorkItem {
     key: String,
     etag: Option<String>,
     size: i64,
+    /// Number of parts if this is a multipart object (from ETag "-N" suffix), else `None`.
+    part_count: Option<u32>,
+}
+
+/// Parse the part count from a multipart ETag like `"abc123-5"` → `Some(5)`.
+/// Returns `None` for single-part ETags.
+fn parse_part_count(etag: &str) -> Option<u32> {
+    let etag = etag.trim_matches('"');
+    let suffix = etag.rsplit_once('-')?.1;
+    suffix.parse::<u32>().ok().filter(|&n| n > 0)
 }
 
 /// Run a full batch replication job. Spawned as a background task.
@@ -271,8 +289,9 @@ async fn enumerate_and_transfer<S: StorageAPI + 'static>(
             object_count = items.len(),
             bucket_source = source_bucket,
             bucket_target = target_bucket,
-            "satch replicate object page"
+            "batch replicate object page"
         );
+
         for item in items {
             if control.cancel.is_cancelled() {
                 return Err(BatchError::JobCancelled);
@@ -296,7 +315,7 @@ async fn enumerate_and_transfer<S: StorageAPI + 'static>(
 
             let _permit = sem.clone().acquire_owned().await.expect("semaphore open");
 
-            match transfer_object(
+            let transfer_result = dispatch_transfer(
                 source_client,
                 target_client,
                 ecstore.clone(),
@@ -304,9 +323,12 @@ async fn enumerate_and_transfer<S: StorageAPI + 'static>(
                 &item.key,
                 &target_bucket,
                 &target_key,
+                item.size,
+                item.part_count,
             )
-            .await
-            {
+            .await;
+
+            match transfer_result {
                 Ok(bytes) => {
                     debug!(
                         job_id = job_id,
@@ -320,10 +342,11 @@ async fn enumerate_and_transfer<S: StorageAPI + 'static>(
                 Err(e) => {
                     warn!(
                         job_id = job_id,
-                        key = %item.key, 
+                        key = %item.key,
                         bucket_source = source_bucket,
                         bucket_target = &target_bucket,
-                         "failure replicate object: {e}");
+                        "failure replicate object: {e}"
+                    );
                     counters.inc_failure(item.size);
                     let rec = FailureRecord {
                         key: item.key.clone(),
@@ -388,10 +411,14 @@ async fn fetch_page<S: StorageAPI + 'static>(
             .objects
             .into_iter()
             .filter(|obj| passes_filter(obj, filter))
-            .map(|obj| WorkItem {
-                key: obj.key,
-                etag: obj.etag,
-                size: obj.size,
+            .map(|obj| {
+                let part_count = obj.etag.as_deref().and_then(parse_part_count);
+                WorkItem {
+                    key: obj.key,
+                    etag: obj.etag,
+                    size: obj.size,
+                    part_count,
+                }
             })
             .collect();
         Ok((items, page.next_token))
@@ -433,10 +460,14 @@ async fn fetch_page<S: StorageAPI + 'static>(
                 };
                 passes_filter(&lo, filter)
             })
-            .map(|obj| WorkItem {
-                key: obj.name,
-                etag: obj.etag,
-                size: obj.size,
+            .map(|obj| {
+                let part_count = obj.etag.as_deref().and_then(parse_part_count);
+                WorkItem {
+                    key: obj.name,
+                    etag: obj.etag,
+                    size: obj.size,
+                    part_count,
+                }
             })
             .collect();
 
@@ -467,8 +498,9 @@ async fn retry_failures<S: StorageAPI + 'static>(
         }
 
         let target_key = build_target_key(&rec.key, &target_prefix);
+        let part_count = rec.key.rsplit_once('-').and_then(|(_, s)| s.parse::<u32>().ok());
 
-        match transfer_object(
+        match dispatch_transfer(
             source_client,
             target_client,
             ecstore.clone(),
@@ -476,6 +508,8 @@ async fn retry_failures<S: StorageAPI + 'static>(
             &rec.key,
             target_bucket,
             &target_key,
+            rec.size,
+            part_count,
         )
         .await
         {
@@ -506,6 +540,485 @@ async fn retry_failures<S: StorageAPI + 'static>(
     }
 
     Ok(())
+}
+
+/// Route a single object to the appropriate transfer function based on
+/// whether it is single-part or multipart. Returns bytes transferred.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_transfer<S: StorageAPI + 'static>(
+    source_client: Option<&BatchS3Client>,
+    target_client: Option<&BatchS3Client>,
+    ecstore: Arc<S>,
+    source_bucket: &str,
+    source_key: &str,
+    target_bucket: &str,
+    target_key: &str,
+    size: i64,
+    part_count: Option<u32>,
+) -> Result<i64> {
+    if let Some(n) = part_count {
+        multipart_transfer_object(
+            source_client,
+            target_client,
+            ecstore,
+            source_bucket,
+            source_key,
+            target_bucket,
+            target_key,
+            n,
+        )
+        .await
+    } else {
+        stream_transfer_object(
+            source_client,
+            target_client,
+            ecstore,
+            source_bucket,
+            source_key,
+            target_bucket,
+            target_key,
+            size,
+        )
+        .await
+    }
+}
+
+/// Transfer a single-part (or unknown-layout) object by streaming GET → PUT
+/// without buffering the full body in memory.
+///
+/// The four direction cases:
+/// - Local → Remote: `get_object_reader` → `ByteStream` → `put_object_stream`
+/// - Remote → Local: `get_object_stream` → `AsyncRead` → `put_object`
+/// - Local → Local:  `copy_object` (server-side, no byte movement through this process)
+/// - Remote → Remote: `get_object_stream` → `put_object_stream` (piped)
+#[allow(clippy::too_many_arguments)]
+async fn stream_transfer_object<S: StorageAPI + 'static>(
+    source_client: Option<&BatchS3Client>,
+    target_client: Option<&BatchS3Client>,
+    ecstore: Arc<S>,
+    source_bucket: &str,
+    source_key: &str,
+    target_bucket: &str,
+    target_key: &str,
+    size: i64,
+) -> Result<i64> {
+    match (source_client, target_client) {
+        // Local → Local: server-side copy, no byte movement
+        (None, None) => {
+            let mut src_info = ecstore
+                .get_object_info(source_bucket, source_key, &ObjectOptions::default())
+                .await
+                .map_err(|e| BatchError::Transfer(e.to_string()))?;
+
+            let bytes = src_info.size;
+
+            ecstore
+                .copy_object(
+                    source_bucket,
+                    source_key,
+                    target_bucket,
+                    target_key,
+                    &mut src_info,
+                    &ObjectOptions::default(),
+                    &ObjectOptions::default(),
+                )
+                .await
+                .map_err(|e| BatchError::Transfer(e.to_string()))?;
+
+            Ok(bytes)
+        }
+
+        // Local → Remote: read from ECStore, stream to S3
+        (None, Some(tc)) => {
+            let reader = ecstore
+                .get_object_reader(source_bucket, source_key, None, HeaderMap::new(), &ObjectOptions::default())
+                .await
+                .map_err(|e| BatchError::Transfer(e.to_string()))?;
+
+            let actual_size = reader.object_info.size;
+            let stream = async_read_to_bytestream(reader.stream);
+            tc.put_object_stream(target_key, stream, actual_size, HashMap::new()).await?;
+            Ok(actual_size)
+        }
+
+        // Remote → Local: stream from S3, write to ECStore
+        (Some(sc), None) => {
+            let (byte_stream, remote_size) = sc.get_object_stream(source_key).await?;
+            let actual_size = if remote_size > 0 { remote_size } else { size };
+
+            // ByteStream implements AsyncRead via the SDK's built-in adapter
+            let async_read = byte_stream.into_async_read();
+            let mut put_reader = PutObjReader::from_async_read(async_read, actual_size);
+
+            ecstore
+                .put_object(target_bucket, target_key, &mut put_reader, &ObjectOptions::default())
+                .await
+                .map_err(|e| BatchError::Transfer(e.to_string()))?;
+
+            Ok(actual_size)
+        }
+
+        // Remote → Remote: stream from S3 source directly to S3 target
+        (Some(sc), Some(tc)) => {
+            let (byte_stream, remote_size) = sc.get_object_stream(source_key).await?;
+            let actual_size = if remote_size > 0 { remote_size } else { size };
+            tc.put_object_stream(target_key, byte_stream, actual_size, HashMap::new())
+                .await?;
+            Ok(actual_size)
+        }
+    }
+}
+
+/// Transfer a multipart object part-by-part, preserving original part boundaries.
+///
+/// Opens a multipart upload on the target, fetches each source part by number
+/// (preserving original part sizes), uploads it, then completes the upload.
+/// On any error the target upload is aborted before returning.
+#[allow(clippy::too_many_arguments)]
+async fn multipart_transfer_object<S: StorageAPI + 'static>(
+    source_client: Option<&BatchS3Client>,
+    target_client: Option<&BatchS3Client>,
+    ecstore: Arc<S>,
+    source_bucket: &str,
+    source_key: &str,
+    target_bucket: &str,
+    target_key: &str,
+    part_count: u32,
+) -> Result<i64> {
+    // For local→local multipart, fall back to copy_object_part so bytes don't
+    // traverse this process. Individual parts are handled via copy.
+    if source_client.is_none() && target_client.is_none() {
+        return local_to_local_multipart(ecstore, source_bucket, source_key, target_bucket, target_key, part_count).await;
+    }
+
+    let upload_id = open_target_multipart(target_client, ecstore.clone(), target_bucket, target_key).await?;
+
+    let result = do_multipart_parts(
+        source_client,
+        target_client,
+        ecstore.clone(),
+        source_bucket,
+        source_key,
+        target_bucket,
+        target_key,
+        &upload_id,
+        part_count,
+    )
+    .await;
+
+    match result {
+        Ok((completed_parts, total_bytes)) => {
+            complete_target_multipart(target_client, ecstore, target_bucket, target_key, &upload_id, completed_parts).await?;
+            Ok(total_bytes)
+        }
+        Err(e) => {
+            if let Err(ae) = abort_target_multipart(target_client, ecstore, target_bucket, target_key, &upload_id).await {
+                warn!("abort multipart upload failed after transfer error ({}): {ae}", source_key);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Open a multipart upload on the target (remote or local).
+async fn open_target_multipart<S: StorageAPI>(
+    target_client: Option<&BatchS3Client>,
+    ecstore: Arc<S>,
+    target_bucket: &str,
+    target_key: &str,
+) -> Result<String> {
+    if let Some(tc) = target_client {
+        tc.create_multipart_upload(target_key).await
+    } else {
+        let result = ecstore
+            .new_multipart_upload(target_bucket, target_key, &ObjectOptions::default())
+            .await
+            .map_err(|e| BatchError::Transfer(e.to_string()))?;
+        Ok(result.upload_id)
+    }
+}
+
+/// Complete a multipart upload on the target.
+async fn complete_target_multipart<S: StorageAPI>(
+    target_client: Option<&BatchS3Client>,
+    ecstore: Arc<S>,
+    target_bucket: &str,
+    target_key: &str,
+    upload_id: &str,
+    parts: Vec<(i32, String)>,
+) -> Result<()> {
+    if let Some(tc) = target_client {
+        tc.complete_multipart_upload(target_key, upload_id, parts).await
+    } else {
+        let complete_parts: Vec<CompletePart> = parts
+            .into_iter()
+            .map(|(num, etag)| CompletePart {
+                part_num: num as usize,
+                etag: Some(etag),
+                checksum_crc32: None,
+                checksum_crc32c: None,
+                checksum_sha1: None,
+                checksum_sha256: None,
+                checksum_crc64nvme: None,
+            })
+            .collect();
+
+        ecstore
+            .clone()
+            .complete_multipart_upload(target_bucket, target_key, upload_id, complete_parts, &ObjectOptions::default())
+            .await
+            .map_err(|e| BatchError::Transfer(e.to_string()))?;
+        Ok(())
+    }
+}
+
+/// Abort a multipart upload on the target.
+async fn abort_target_multipart<S: StorageAPI>(
+    target_client: Option<&BatchS3Client>,
+    ecstore: Arc<S>,
+    target_bucket: &str,
+    target_key: &str,
+    upload_id: &str,
+) -> Result<()> {
+    if let Some(tc) = target_client {
+        tc.abort_multipart_upload(target_key, upload_id).await
+    } else {
+        ecstore
+            .abort_multipart_upload(target_bucket, target_key, upload_id, &ObjectOptions::default())
+            .await
+            .map_err(|e| BatchError::Transfer(e.to_string()))
+    }
+}
+
+/// Transfer all parts for a multipart object.
+/// Returns a list of `(part_number, etag)` pairs and the total bytes transferred.
+#[allow(clippy::too_many_arguments)]
+async fn do_multipart_parts<S: StorageAPI + 'static>(
+    source_client: Option<&BatchS3Client>,
+    target_client: Option<&BatchS3Client>,
+    ecstore: Arc<S>,
+    source_bucket: &str,
+    source_key: &str,
+    target_bucket: &str,
+    target_key: &str,
+    upload_id: &str,
+    part_count: u32,
+) -> Result<(Vec<(i32, String)>, i64)> {
+    let mut completed_parts: Vec<(i32, String)> = Vec::with_capacity(part_count as usize);
+    let mut total_bytes: i64 = 0;
+
+    for part_num in 1..=part_count {
+        let (part_stream, part_size) =
+            get_source_part_stream(source_client, ecstore.clone(), source_bucket, source_key, part_num).await?;
+
+        let part_etag = put_target_part(
+            target_client,
+            ecstore.clone(),
+            target_bucket,
+            target_key,
+            upload_id,
+            part_num,
+            part_stream,
+            part_size,
+        )
+        .await?;
+
+        completed_parts.push((part_num as i32, part_etag));
+        total_bytes += part_size;
+    }
+
+    Ok((completed_parts, total_bytes))
+}
+
+/// Fetch a single part from the source as a `ByteStream` + size pair.
+///
+/// For remote sources, uses the S3 `PartNumber` query parameter.
+/// For local sources, uses `get_object_reader` with `ObjectOptions { part_number }`.
+async fn get_source_part_stream<S: StorageAPI>(
+    source_client: Option<&BatchS3Client>,
+    ecstore: Arc<S>,
+    source_bucket: &str,
+    source_key: &str,
+    part_num: u32,
+) -> Result<(PartStream, i64)> {
+    if let Some(sc) = source_client {
+        let (byte_stream, size) = sc.get_object_part_stream(source_key, part_num).await?;
+        Ok((PartStream::Remote(byte_stream), size))
+    } else {
+        let opts = ObjectOptions {
+            part_number: Some(part_num as usize),
+            ..Default::default()
+        };
+        let reader = ecstore
+            .get_object_reader(source_bucket, source_key, None, HeaderMap::new(), &opts)
+            .await
+            .map_err(|e| BatchError::Transfer(e.to_string()))?;
+        let size = reader.object_info.size;
+        Ok((PartStream::Local(reader), size))
+    }
+}
+
+/// Upload a single part to the target.
+async fn put_target_part<S: StorageAPI + 'static>(
+    target_client: Option<&BatchS3Client>,
+    ecstore: Arc<S>,
+    target_bucket: &str,
+    target_key: &str,
+    upload_id: &str,
+    part_num: u32,
+    part_stream: PartStream,
+    part_size: i64,
+) -> Result<String> {
+    if let Some(tc) = target_client {
+        let byte_stream = part_stream.into_byte_stream(part_size);
+        tc.upload_part(target_key, upload_id, part_num, byte_stream, part_size).await
+    } else {
+        let mut put_reader = part_stream.into_put_obj_reader(part_size);
+        let info = ecstore
+            .put_object_part(
+                target_bucket,
+                target_key,
+                upload_id,
+                part_num as usize,
+                &mut put_reader,
+                &ObjectOptions::default(),
+            )
+            .await
+            .map_err(|e| BatchError::Transfer(e.to_string()))?;
+        Ok(info.etag.unwrap_or_default())
+    }
+}
+
+/// Server-side multipart copy for local→local transfers.
+/// Uses `copy_object_part` which avoids moving bytes through this process.
+async fn local_to_local_multipart<S: StorageAPI + 'static>(
+    ecstore: Arc<S>,
+    source_bucket: &str,
+    source_key: &str,
+    target_bucket: &str,
+    target_key: &str,
+    part_count: u32,
+) -> Result<i64> {
+    let src_info = ecstore
+        .get_object_info(source_bucket, source_key, &ObjectOptions::default())
+        .await
+        .map_err(|e| BatchError::Transfer(e.to_string()))?;
+
+    let total_size = src_info.size;
+    let parts = src_info.parts.clone();
+
+    // Open multipart upload on target
+    let mp = ecstore
+        .new_multipart_upload(target_bucket, target_key, &ObjectOptions::default())
+        .await
+        .map_err(|e| BatchError::Transfer(e.to_string()))?;
+
+    let upload_id = mp.upload_id.clone();
+
+    let result: Result<Vec<CompletePart>> = async {
+        let mut completed: Vec<CompletePart> = Vec::with_capacity(part_count as usize);
+
+        for part_num in 1..=part_count {
+            // Determine byte range for this part
+            let (start_offset, length) = if parts.is_empty() {
+                // If no part metadata, fall back to full-object copy for single part
+                (0i64, total_size)
+            } else {
+                let idx = (part_num - 1) as usize;
+                if idx >= parts.len() {
+                    return Err(BatchError::Transfer(format!(
+                        "part {part_num} not found in source metadata (only {} parts)",
+                        parts.len()
+                    )));
+                }
+                let mut offset = 0i64;
+                for p in &parts[..idx] {
+                    offset += p.actual_size;
+                }
+                (offset, parts[idx].actual_size)
+            };
+
+            let src_info_ref = &src_info;
+            ecstore
+                .copy_object_part(
+                    source_bucket,
+                    source_key,
+                    target_bucket,
+                    target_key,
+                    &upload_id,
+                    part_num as usize,
+                    start_offset,
+                    length,
+                    src_info_ref,
+                    &ObjectOptions::default(),
+                    &ObjectOptions::default(),
+                )
+                .await
+                .map_err(|e| BatchError::Transfer(e.to_string()))?;
+
+            completed.push(CompletePart {
+                part_num: part_num as usize,
+                etag: None, // ECStore fills this from its internal state
+                checksum_crc32: None,
+                checksum_crc32c: None,
+                checksum_sha1: None,
+                checksum_sha256: None,
+                checksum_crc64nvme: None,
+            });
+        }
+        Ok(completed)
+    }
+    .await;
+
+    match result {
+        Ok(completed_parts) => {
+            ecstore
+                .clone()
+                .complete_multipart_upload(target_bucket, target_key, &upload_id, completed_parts, &ObjectOptions::default())
+                .await
+                .map_err(|e| BatchError::Transfer(e.to_string()))?;
+            Ok(total_size)
+        }
+        Err(e) => {
+            let _ = ecstore
+                .abort_multipart_upload(target_bucket, target_key, &upload_id, &ObjectOptions::default())
+                .await;
+            Err(e)
+        }
+    }
+}
+
+/// Unifies local (`GetObjectReader`) and remote (`ByteStream`) part sources so that
+/// `put_target_part` can consume either without an intermediate buffer.
+enum PartStream {
+    Remote(ByteStream),
+    Local(rustfs_ecstore::store_api::GetObjectReader),
+}
+
+impl PartStream {
+    fn into_byte_stream(self, _size: i64) -> ByteStream {
+        match self {
+            PartStream::Remote(bs) => bs,
+            PartStream::Local(reader) => async_read_to_bytestream(reader.stream),
+        }
+    }
+
+    fn into_put_obj_reader(self, size: i64) -> PutObjReader {
+        match self {
+            PartStream::Remote(bs) => {
+                let async_read = bs.into_async_read();
+                PutObjReader::from_async_read(async_read, size)
+            }
+            PartStream::Local(reader) => PutObjReader::from_async_read(reader.stream, size),
+        }
+    }
+}
+
+/// Wrap an `AsyncRead` as a non-retryable `ByteStream` suitable for AWS SDK PUT calls.
+fn async_read_to_bytestream(reader: impl tokio::io::AsyncRead + Send + Sync + Unpin + 'static) -> ByteStream {
+    let stream = ReaderStream::new(reader);
+    let body = StreamBody::new(stream.map(|r: std::io::Result<_>| r.map(Frame::data)));
+    ByteStream::new(SdkBody::from_body_1_x(body))
 }
 
 fn build_target_key(source_key: &str, target_prefix: &str) -> String {
@@ -542,51 +1055,6 @@ async fn check_target_exists<S: StorageAPI + 'static>(
             Err(_) => false,
         }
     }
-}
-
-/// GET from source and PUT to target. Returns bytes transferred.
-async fn transfer_object<S: StorageAPI + 'static>(
-    source_client: Option<&BatchS3Client>,
-    target_client: Option<&BatchS3Client>,
-    ecstore: Arc<S>,
-    source_bucket: &str,
-    source_key: &str,
-    target_bucket: &str,
-    target_key: &str,
-) -> Result<i64> {
-    let (body, size) = if let Some(sc) = source_client {
-        sc.get_object(source_key).await?
-    } else {
-        get_local_object(ecstore.as_ref(), source_bucket, source_key).await?
-    };
-
-    if let Some(tc) = target_client {
-        tc.put_object(target_key, body, HashMap::new()).await?;
-    } else {
-        put_local_object(ecstore.as_ref(), target_bucket, target_key, body).await?;
-    }
-
-    Ok(size)
-}
-
-async fn get_local_object<S: StorageAPI>(store: &S, bucket: &str, key: &str) -> Result<(Bytes, i64)> {
-    let mut reader = store
-        .get_object_reader(bucket, key, None, HeaderMap::new(), &ObjectOptions::default())
-        .await
-        .map_err(|e| BatchError::Transfer(e.to_string()))?;
-
-    let size = reader.object_info.size;
-    let data = reader.read_all().await.map_err(|e| BatchError::Transfer(e.to_string()))?;
-    Ok((Bytes::from(data), size))
-}
-
-async fn put_local_object<S: StorageAPI>(store: &S, bucket: &str, key: &str, body: Bytes) -> Result<()> {
-    let mut reader = PutObjReader::from_vec(body.into());
-    store
-        .put_object(bucket, key, &mut reader, &ObjectOptions::default())
-        .await
-        .map_err(|e| BatchError::Transfer(e.to_string()))?;
-    Ok(())
 }
 
 /// Apply filter rules to decide whether to include an object in the transfer.
@@ -643,10 +1111,28 @@ fn parse_duration_to_chrono(s: &str) -> chrono::Duration {
     }
 }
 
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::yaml::FilterYaml;
+
+    #[test]
+    fn test_parse_part_count_multipart() {
+        assert_eq!(parse_part_count("abc123-5"), Some(5));
+        assert_eq!(parse_part_count("\"abc123-5\""), Some(5)); // quoted ETag
+        assert_eq!(parse_part_count("deadbeef-1"), Some(1));
+        assert_eq!(parse_part_count("deadbeef-100"), Some(100));
+    }
+
+    #[test]
+    fn test_parse_part_count_single_part() {
+        // A regular MD5 ETag has no "-N" suffix with a pure numeric component
+        assert_eq!(parse_part_count("d41d8cd98f00b204e9800998ecf8427e"), None);
+        // Zero is not a valid part count
+        assert_eq!(parse_part_count("abc-0"), None);
+    }
 
     #[test]
     fn test_passes_filter_no_filter() {
