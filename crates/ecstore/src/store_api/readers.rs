@@ -49,15 +49,8 @@ impl PutObjReader {
         R: AsyncRead + Unpin + Send + Sync + 'static,
     {
         PutObjReader {
-            stream: HashReader::new(
-                Box::new(WarpReader::new(reader)),
-                size,
-                size,
-                None,
-                None,
-                false,
-            )
-            .expect("HashReader::new is infallible for a fresh reader with no pre-set checksums"),
+            stream: HashReader::new(Box::new(WarpReader::new(reader)), size, size, None, None, false)
+                .expect("HashReader::new is infallible for a fresh reader with no pre-set checksums"),
         }
     }
 

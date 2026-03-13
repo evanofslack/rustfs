@@ -25,9 +25,7 @@
 //!     batch_replication -- --ignored
 //! ```
 
-use crate::common::{
-    RustFSTestClusterEnvironment, RustFSTestEnvironment, awscurl_get, awscurl_post, init_logging,
-};
+use crate::common::{RustFSTestClusterEnvironment, RustFSTestEnvironment, awscurl_get, awscurl_post, init_logging};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use serial_test::serial;
@@ -220,11 +218,7 @@ async fn batch_replicate_multipart_local_to_local() -> Result<(), Box<dyn std::e
         .bucket(src)
         .key(key)
         .upload_id(upload_id)
-        .multipart_upload(
-            CompletedMultipartUpload::builder()
-                .set_parts(Some(completed_parts))
-                .build(),
-        )
+        .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(completed_parts)).build())
         .send()
         .await?;
 
@@ -414,11 +408,7 @@ async fn batch_replicate_multipart_cluster() -> Result<(), Box<dyn std::error::E
         .bucket(src)
         .key(key)
         .upload_id(upload_id)
-        .multipart_upload(
-            CompletedMultipartUpload::builder()
-                .set_parts(Some(completed_parts))
-                .build(),
-        )
+        .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(completed_parts)).build())
         .send()
         .await?;
 

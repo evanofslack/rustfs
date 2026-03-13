@@ -567,9 +567,7 @@ impl RustFSTestClusterEnvironment {
                     }
                     Ok(_) | Err(_) => {
                         if attempt + 1 == MAX_ATTEMPTS {
-                            return Err(
-                                format!("IAM not initialized on {} after {}s", node.address, MAX_ATTEMPTS).into()
-                            );
+                            return Err(format!("IAM not initialized on {} after {}s", node.address, MAX_ATTEMPTS).into());
                         }
                         sleep(Duration::from_secs(1)).await;
                     }

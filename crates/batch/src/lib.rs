@@ -182,9 +182,12 @@ impl<S: StorageAPI + 'static> BatchService<S> {
 
     /// Get the status of the most recently created in-progress job on this node.
     pub async fn job_status_last_active(&self) -> Option<job::BatchJobStatus> {
-        self.registry.get_last_active_job_snapshot().await.map(|s| job::BatchJobStatus {
-            last_metric: s.to_job_metric(),
-        })
+        self.registry
+            .get_last_active_job_snapshot()
+            .await
+            .map(|s| job::BatchJobStatus {
+                last_metric: s.to_job_metric(),
+            })
     }
 
     /// Get status of all jobs within the retention window on this node.

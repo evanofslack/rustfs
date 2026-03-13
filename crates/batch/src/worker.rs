@@ -876,7 +876,6 @@ async fn put_target_part<S: StorageAPI + 'static>(
     }
 }
 
-
 /// Unifies local (`GetObjectReader`) and remote (`ByteStream`) part sources so that
 /// `put_target_part` can consume either without an intermediate buffer.
 enum PartStream {
