@@ -16,7 +16,7 @@
 members = [
     "rustfs", # Core file system implementation
     "crates/appauth", # Application authentication and authorization
-    "crates/batch", # Batch job framework (replicate, future: keyrotate, expire)
+    "crates/batch", # Batch job framework (batch replicate)
     "crates/audit", # Audit target management system with multi-target fan-out
     "crates/checksums", # client checksums
     "crates/common", # Shared utilities and data structures

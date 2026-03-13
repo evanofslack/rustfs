@@ -52,10 +52,7 @@ const ENV_JOB_RETENTION_DAYS: &str = "RUSTFS_BATCH_JOB_RETENTION_DAYS";
 const DEFAULT_JOB_RETENTION_DAYS: u64 = 3;
 
 fn job_retention() -> Duration {
-    let days = std::env::var(ENV_JOB_RETENTION_DAYS)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_JOB_RETENTION_DAYS);
+    let days = rustfs_utils::get_env_u64(ENV_JOB_RETENTION_DAYS, DEFAULT_JOB_RETENTION_DAYS);
     Duration::from_hours(days * 24)
 }
 
@@ -116,7 +113,7 @@ impl<S: StorageAPI + 'static> BatchService<S> {
         let replicate = job_def
             .replicate
             .as_ref()
-            .ok_or_else(|| error::BatchError::UnsupportedJobType("only 'replicate' is currently supported".into()))?;
+            .ok_or_else(|| error::BatchError::UnsupportedJobType("only job type 'replicate' is currently supported".into()))?;
 
         let yaml_hash = {
             use std::hash::{Hash, Hasher};

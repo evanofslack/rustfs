@@ -157,7 +157,7 @@ impl JobCounters {
     }
 
     /// Reset failure counters before a retry pass so metrics don't double-count
-    /// across attempts (mirrors MinIO's batchJobInfo retry behaviour).
+    /// across attempts (mirrors minio's batchJobInfo retry behaviour).
     pub fn reset_failures(&self) {
         self.objects_failed.store(0, Ordering::Relaxed);
         self.bytes_failed.store(0, Ordering::Relaxed);
@@ -173,7 +173,6 @@ impl JobCounters {
     }
 }
 
-/// Control handle for a running job.
 #[derive(Clone, Debug)]
 pub struct JobControl {
     pub cancel: CancellationToken,
@@ -189,7 +188,6 @@ impl JobControl {
     }
 }
 
-/// Response returned to the caller when a job is started (matches BatchJobResult in madmin-go).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BatchJobResult {
     pub id: String,
@@ -199,20 +197,18 @@ pub struct BatchJobResult {
     pub started: DateTime<Utc>,
 }
 
-/// Status response (matches BatchJobStatus in madmin-go).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BatchJobStatus {
     #[serde(rename = "LastMetric")]
     pub last_metric: rustfs_madmin::metrics::JobMetric,
 }
 
-/// Response for `?all=true` on status-job — returns all jobs in the retention window.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BatchJobStatusList {
     pub statuses: Vec<BatchJobStatus>,
 }
 
-/// Entry in a list-jobs response (matches BatchJobInfo in madmin-go).
+/// Entry in a list-jobs response.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BatchJobInfo {
     pub id: String,
@@ -225,7 +221,6 @@ pub struct BatchJobInfo {
     pub status: String,
 }
 
-/// Response for list-jobs (matches ListBatchJobsResult in madmin-go).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListBatchJobsResult {
     pub jobs: Vec<BatchJobInfo>,
