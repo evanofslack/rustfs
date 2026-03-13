@@ -302,6 +302,10 @@ async fn run(config: config::Config) -> Result<()> {
     // Initialize KMS system if enabled
     init_kms_system(&config).await?;
 
+    // Initialize S3 Tables catalog if feature is enabled
+    #[cfg(feature = "tables")]
+    rustfs_tables::init_tables_catalog();
+
     // Initialize FTP system if enabled
     #[cfg(feature = "ftps")]
     let ftp_shutdown_tx = match init_ftp_system().await {

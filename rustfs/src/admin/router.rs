@@ -14,7 +14,7 @@
 
 use crate::admin::console::{is_console_path, make_console_server};
 use crate::admin::handlers::oidc::is_oidc_path;
-use crate::server::{ADMIN_PREFIX, HEALTH_PREFIX, HEALTH_READY_PATH, PROFILE_CPU_PATH, PROFILE_MEMORY_PATH, RPC_PREFIX};
+use crate::server::{ADMIN_PREFIX, HEALTH_PREFIX, HEALTH_READY_PATH, ICEBERG_PREFIX, PROFILE_CPU_PATH, PROFILE_MEMORY_PATH, RPC_PREFIX};
 use hyper::HeaderMap;
 use hyper::Method;
 use hyper::StatusCode;
@@ -120,7 +120,10 @@ where
             return true;
         }
 
-        path.starts_with(ADMIN_PREFIX) || path.starts_with(RPC_PREFIX) || is_console_path(path)
+        path.starts_with(ADMIN_PREFIX)
+            || path.starts_with(RPC_PREFIX)
+            || is_console_path(path)
+            || path.starts_with(ICEBERG_PREFIX)
     }
 
     // check_access before call

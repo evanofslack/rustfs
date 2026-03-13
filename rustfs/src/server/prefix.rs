@@ -54,6 +54,11 @@ pub(crate) const RPC_PREFIX: &str = "/rustfs/rpc";
 /// For example, the full gRPC method path would be "/node_service.NodeService/MethodName".
 pub(crate) const TONIC_PREFIX: &str = "/node_service.NodeService";
 
+/// Base path for the Iceberg REST Catalog API (S3 Tables feature).
+/// All `/_iceberg/v1/...` endpoints are mounted under this prefix.
+/// Authentication uses SigV4 with service name `s3tables`.
+pub(crate) const ICEBERG_PREFIX: &str = "/_iceberg";
+
 /// LOGO art for RustFS server.
 pub(crate) const LOGO: &str = r#"
 

@@ -31,6 +31,9 @@ use router::{AdminOperation, S3Router};
 use rpc::register_rpc_route;
 use s3s::route::S3Route;
 
+#[cfg(feature = "tables")]
+use handlers::tables;
+
 /// Create admin router
 ///
 /// # Arguments
@@ -61,6 +64,9 @@ pub fn make_admin_route(console_enabled: bool) -> std::io::Result<impl S3Route> 
     profile_admin::register_profiling_route(&mut r)?;
     kms::register_kms_route(&mut r)?;
     oidc::register_oidc_route(&mut r)?;
+
+    #[cfg(feature = "tables")]
+    tables::register_tables_routes(&mut r)?;
 
     Ok(r)
 }

@@ -14,6 +14,8 @@
 
 pub mod account_info;
 pub mod bucket_meta;
+#[cfg(feature = "tables")]
+pub mod tables;
 pub mod event;
 pub mod group;
 pub mod heal;
