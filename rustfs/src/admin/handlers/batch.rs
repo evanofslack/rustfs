@@ -41,11 +41,11 @@ use hyper::StatusCode;
 use matchit::Params;
 use reqwest::Client;
 use rustfs_batch::{get_global_batch_service, parse_owner_node, yaml::REPLICATE_JOB_TEMPLATE};
-use rustfs_utils::http::headers::RUSTFS_BATCH_PROXY_REQUEST;
 use rustfs_common::get_global_local_node_name;
 use rustfs_config::MAX_ADMIN_REQUEST_BODY_SIZE;
 use rustfs_ecstore::global::get_global_endpoints;
 use rustfs_policy::policy::action::{Action, AdminAction};
+use rustfs_utils::http::headers::RUSTFS_BATCH_PROXY_REQUEST;
 use s3s::{Body, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, s3_error};
 use std::collections::HashMap;
 use tracing::{error, warn};
@@ -118,7 +118,6 @@ async fn proxy_to_node(target_base_url: &str, req: S3Request<Body>) -> S3Result<
         .map_err(|e| S3Error::with_message(S3ErrorCode::InternalError, format!("proxy: bad method: {e}")))?;
 
     let body_bytes = {
-        use s3s::stream::ByteStream;
         let mut input = req.input;
         input
             .store_all_limited(MAX_ADMIN_REQUEST_BODY_SIZE)
@@ -255,7 +254,11 @@ impl Operation for ListBatchJobsHandler {
         // Skip fan-out when this request was itself forwarded by a peer to avoid
         // infinite proxy loops.
         let is_proxied = req.headers.get(RUSTFS_BATCH_PROXY_REQUEST).is_some();
-        let peer_urls = if is_proxied { vec![] } else { non_local_peer_base_urls().await };
+        let peer_urls = if is_proxied {
+            vec![]
+        } else {
+            non_local_peer_base_urls().await
+        };
         if !peer_urls.is_empty() {
             let path_and_query = req.uri.path_and_query().map(|pq| pq.as_str().to_owned()).unwrap_or_default();
             let orig_headers = req.headers.clone();
@@ -326,7 +329,11 @@ impl Operation for BatchJobStatusHandler {
 
             // Fan-out to peers; skip if this request was itself forwarded.
             let is_proxied = req.headers.get(RUSTFS_BATCH_PROXY_REQUEST).is_some();
-            let peer_urls = if is_proxied { vec![] } else { non_local_peer_base_urls().await };
+            let peer_urls = if is_proxied {
+                vec![]
+            } else {
+                non_local_peer_base_urls().await
+            };
             if !peer_urls.is_empty() {
                 let pq = req.uri.path_and_query().map(|pq| pq.as_str().to_owned()).unwrap_or_default();
                 let hdrs = req.headers.clone();
@@ -378,7 +385,11 @@ impl Operation for BatchJobStatusHandler {
 
             // Skip fan-out when this request was itself forwarded by a peer.
             let is_proxied = req.headers.get(RUSTFS_BATCH_PROXY_REQUEST).is_some();
-            let peer_urls = if is_proxied { vec![] } else { non_local_peer_base_urls().await };
+            let peer_urls = if is_proxied {
+                vec![]
+            } else {
+                non_local_peer_base_urls().await
+            };
             let mut candidates: Vec<rustfs_batch::job::BatchJobStatus> = local.into_iter().collect();
 
             if !peer_urls.is_empty() {
