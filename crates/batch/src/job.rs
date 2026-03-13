@@ -156,6 +156,13 @@ impl JobCounters {
         self.bytes_failed.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// Reset failure counters before a retry pass so metrics don't double-count
+    /// across attempts (mirrors MinIO's batchJobInfo retry behaviour).
+    pub fn reset_failures(&self) {
+        self.objects_failed.store(0, Ordering::Relaxed);
+        self.bytes_failed.store(0, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> (i64, i64, i64, i64) {
         (
             self.objects.load(Ordering::Relaxed),
@@ -274,6 +281,22 @@ mod tests {
         assert_eq!(failed, 1);
         assert_eq!(bytes, 3072);
         assert_eq!(bytes_failed, 512);
+    }
+
+    #[test]
+    fn test_reset_failures_clears_only_failure_counters() {
+        let c = JobCounters::default();
+        c.inc_success(1024);
+        c.inc_failure(512);
+        c.inc_failure(256);
+
+        c.reset_failures();
+
+        let (objects, failed, bytes, bytes_failed) = c.snapshot();
+        assert_eq!(objects, 1, "success count must survive reset");
+        assert_eq!(bytes, 1024, "bytes_transferred must survive reset");
+        assert_eq!(failed, 0, "objects_failed must be zero after reset");
+        assert_eq!(bytes_failed, 0, "bytes_failed must be zero after reset");
     }
 
     #[test]

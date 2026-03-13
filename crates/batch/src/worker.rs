@@ -178,6 +178,17 @@ async fn run_replication_passes<S: StorageAPI + 'static>(
 
         tokio::time::sleep(retry_delay).await;
 
+        // Reset failure counters before the retry pass so status metrics reflect
+        // only the current attempt's outcome, not the cumulative total across passes.
+        counters.reset_failures();
+
+        // Update retry_attempts in the registry snapshot so status-job responses
+        // report the current attempt number.
+        if let Some(mut snapshot) = registry.get_job(&job.id).await {
+            snapshot.retry_attempts = attempt + 1;
+            registry.update_job_snapshot(&job.id, snapshot).await;
+        }
+
         retry_failures(
             job,
             config,
