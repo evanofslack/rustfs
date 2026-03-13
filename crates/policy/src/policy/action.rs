@@ -144,6 +144,7 @@ pub enum Action {
     AdminAction(AdminAction),
     StsAction(StsAction),
     KmsAction(KmsAction),
+    S3TablesAction(S3TablesAction),
     None,
 }
 
@@ -160,6 +161,7 @@ impl From<&Action> for &str {
             Action::AdminAction(s) => s.into(),
             Action::StsAction(s) => s.into(),
             Action::KmsAction(s) => s.into(),
+            Action::S3TablesAction(s) => s.into(),
             Action::None => "",
         }
     }
@@ -170,6 +172,7 @@ impl Action {
     const ADMIN_PREFIX: &'static str = "admin:";
     const STS_PREFIX: &'static str = "sts:";
     const KMS_PREFIX: &'static str = "kms:";
+    const S3TABLES_PREFIX: &'static str = "s3tables:";
 }
 
 impl TryFrom<&str> for Action {
@@ -194,6 +197,10 @@ impl TryFrom<&str> for Action {
         } else if value.starts_with(Self::KMS_PREFIX) {
             Ok(Self::KmsAction(
                 KmsAction::try_from(value).map_err(|_| IamError::InvalidAction(value.into()))?,
+            ))
+        } else if value.starts_with(Self::S3TABLES_PREFIX) {
+            Ok(Self::S3TablesAction(
+                S3TablesAction::try_from(value).map_err(|_| IamError::InvalidAction(value.into()))?,
             ))
         } else {
             Err(IamError::InvalidAction(value.into()).into())
@@ -614,6 +621,60 @@ pub enum KmsAction {
     AllActions,
 }
 
+// ─── S3 Tables Actions ────────────────────────────────────────────────────────
+
+/// IAM policy actions for the S3 Tables (Iceberg REST Catalog) feature.
+/// Action strings use the `s3tables:` prefix, matching both MinIO AIStor Tables
+/// and AWS S3 Tables conventions, so IAM policies are portable across platforms.
+#[derive(Serialize, Deserialize, Hash, PartialEq, Eq, Clone, IntoStaticStr, Debug, Copy, EnumString)]
+#[serde(try_from = "&str", into = "&str")]
+pub enum S3TablesAction {
+    // Warehouse
+    #[strum(serialize = "s3tables:CreateWarehouse")]
+    CreateWarehouseAction,
+    #[strum(serialize = "s3tables:GetWarehouse")]
+    GetWarehouseAction,
+    #[strum(serialize = "s3tables:ListWarehouses")]
+    ListWarehousesAction,
+    #[strum(serialize = "s3tables:DeleteWarehouse")]
+    DeleteWarehouseAction,
+    // Namespace
+    #[strum(serialize = "s3tables:CreateNamespace")]
+    CreateNamespaceAction,
+    #[strum(serialize = "s3tables:GetNamespace")]
+    GetNamespaceAction,
+    #[strum(serialize = "s3tables:ListNamespaces")]
+    ListNamespacesAction,
+    #[strum(serialize = "s3tables:DeleteNamespace")]
+    DeleteNamespaceAction,
+    #[strum(serialize = "s3tables:UpdateNamespaceProperties")]
+    UpdateNamespacePropertiesAction,
+    // Table
+    #[strum(serialize = "s3tables:CreateTable")]
+    CreateTableAction,
+    #[strum(serialize = "s3tables:GetTable")]
+    GetTableAction,
+    #[strum(serialize = "s3tables:ListTables")]
+    ListTablesAction,
+    #[strum(serialize = "s3tables:DeleteTable")]
+    DeleteTableAction,
+    #[strum(serialize = "s3tables:RenameTable")]
+    RenameTableAction,
+    #[strum(serialize = "s3tables:UpdateTable")]
+    UpdateTableAction,
+    // Wildcard
+    #[strum(serialize = "s3tables:*")]
+    AllS3TablesActions,
+}
+
+impl TryFrom<&str> for S3TablesAction {
+    type Error = crate::error::Error;
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+        use std::str::FromStr;
+        S3TablesAction::from_str(value).map_err(|_| crate::error::Error::InvalidAction(value.into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,5 +730,29 @@ mod tests {
         let arr = parsed.as_array().expect("Should be array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].as_str().unwrap(), "s3:*");
+    }
+
+    #[test]
+    fn test_s3tables_action_parse() {
+        let action = Action::try_from("s3tables:CreateTable").expect("should parse");
+        assert!(matches!(action, Action::S3TablesAction(S3TablesAction::CreateTableAction)));
+    }
+
+    #[test]
+    fn test_s3tables_action_serialize() {
+        let action = Action::S3TablesAction(S3TablesAction::GetTableAction);
+        let s: &str = (&action).into();
+        assert_eq!(s, "s3tables:GetTable");
+    }
+
+    #[test]
+    fn test_s3tables_wildcard_parse() {
+        let action = Action::try_from("s3tables:*").expect("should parse wildcard");
+        assert!(matches!(action, Action::S3TablesAction(S3TablesAction::AllS3TablesActions)));
+    }
+
+    #[test]
+    fn test_s3tables_invalid_action() {
+        assert!(Action::try_from("s3tables:NonExistentAction").is_err());
     }
 }
