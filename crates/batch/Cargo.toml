@@ -32,6 +32,7 @@ workspace = true
 [dependencies]
 rustfs-ecstore = { workspace = true }
 rustfs-madmin = { workspace = true }
+rustfs-common = { workspace = true }
 
 aws-sdk-s3 = { workspace = true }
 
@@ -48,6 +49,7 @@ chrono = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
+reqwest = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
 aws-smithy-types = { workspace = true }

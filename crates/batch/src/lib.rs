@@ -29,6 +29,7 @@
 pub mod client;
 pub mod error;
 pub mod job;
+pub mod peer_client;
 pub mod registry;
 pub mod store;
 pub mod worker;
@@ -36,7 +37,10 @@ pub mod yaml;
 
 use error::Result;
 use job::{BatchJob, BatchJobStatus, BatchJobStatusList, BatchJobType};
+use peer_client::PeerClientPool;
 use registry::JobRegistry;
+use rustfs_common::get_global_local_node_name;
+use rustfs_ecstore::global::get_global_endpoints;
 use rustfs_ecstore::store::ECStore;
 use rustfs_ecstore::store_api::StorageAPI;
 use std::sync::{Arc, OnceLock};
@@ -58,6 +62,25 @@ fn job_retention() -> Duration {
     Duration::from_hours(days * 24)
 }
 
+/// Build a job ID embedding job type and the owning node address so that any
+/// cluster node can route cancel/status requests without a distributed lookup.
+/// Format: `<jobtype>-<uuid>|<node_addr>` (e.g. `replicate-a3f2...|node1:9000`)
+/// When running in single-node mode (node_addr is empty) the `|<node_addr>` suffix
+/// is omitted and all operations remain local.
+async fn make_job_id(job_type: &BatchJobType) -> String {
+    let node_addr = get_global_local_node_name().await;
+    if node_addr.is_empty() {
+        format!("{}-{}", job_type, Uuid::new_v4())
+    } else {
+        format!("{}-{}|{}", job_type, Uuid::new_v4(), node_addr)
+    }
+}
+
+/// Extract the owner node address from a job ID, or `None` for single-node IDs.
+fn parse_owner_node(job_id: &str) -> Option<&str> {
+    job_id.split_once('|').map(|(_, node)| node)
+}
+
 /// Global batch service instance, initialized once during startup.
 static GLOBAL_BATCH_SERVICE: OnceLock<Arc<BatchService<ECStore>>> = OnceLock::new();
 
@@ -75,6 +98,7 @@ pub struct BatchService<S: StorageAPI> {
     pub registry: Arc<JobRegistry>,
     pub store: Arc<BatchStore<S>>,
     pub ecstore: Arc<S>,
+    peers: Arc<PeerClientPool>,
 }
 
 impl<S: StorageAPI + 'static> BatchService<S> {
@@ -83,13 +107,29 @@ impl<S: StorageAPI + 'static> BatchService<S> {
             registry: Arc::new(JobRegistry::new()),
             store: Arc::new(BatchStore::new(ecstore.clone())),
             ecstore,
+            peers: Arc::new(PeerClientPool::new()),
         }
     }
 
+    /// Returns true when the job was started on this node and its in-memory state
+    /// lives in our registry. Returns false when the job must be forwarded to the
+    /// owner node encoded in the job ID.
+    async fn is_local_job(&self, job_id: &str) -> bool {
+        match parse_owner_node(job_id) {
+            None => true,
+            Some(owner) => {
+                let local = get_global_local_node_name().await;
+                local.is_empty() || owner == local
+            }
+        }
+    }
+
+    /// Build the base URL for the node that owns this job.
+    fn owner_base_url(job_id: &str) -> Option<String> {
+        parse_owner_node(job_id).map(|node| format!("http://{node}"))
+    }
+
     /// Start a new batch job from YAML definition bytes.
-    ///
-    /// Returns a [`BatchJob`] with the assigned ID, or an error if the job definition is
-    /// invalid, or a duplicate job is already active.
     pub async fn start_job(&self, yaml_bytes: &[u8], user: String) -> Result<job::BatchJobResult> {
         let yaml_str = std::str::from_utf8(yaml_bytes).map_err(|e| error::BatchError::InvalidJobDefinition(e.to_string()))?;
 
@@ -100,7 +140,6 @@ impl<S: StorageAPI + 'static> BatchService<S> {
             .as_ref()
             .ok_or_else(|| error::BatchError::UnsupportedJobType("only 'replicate' is currently supported".into()))?;
 
-        // Compute dedup hash.
         let yaml_hash = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -108,7 +147,7 @@ impl<S: StorageAPI + 'static> BatchService<S> {
             format!("{:x}", h.finish())
         };
 
-        let job_id = Uuid::new_v4().to_string();
+        let job_id = make_job_id(&BatchJobType::Replicate).await;
         let job = BatchJob::new(job_id.clone(), BatchJobType::Replicate, user, yaml_hash, replicate);
 
         let workers = worker_count();
@@ -124,7 +163,6 @@ impl<S: StorageAPI + 'static> BatchService<S> {
             )
             .await?;
 
-        // Persist definition and initial metadata.
         self.store.save_definition(&job_id, yaml_str).await?;
         self.store.save_job(&job).await?;
 
@@ -135,7 +173,6 @@ impl<S: StorageAPI + 'static> BatchService<S> {
             started: job.created_at,
         };
 
-        // Spawn background task.
         let config = replicate.clone();
         let store = self.store.clone();
         let ecstore = self.ecstore.clone();
@@ -148,59 +185,193 @@ impl<S: StorageAPI + 'static> BatchService<S> {
         Ok(result)
     }
 
-    /// Cancel a running job.
+    /// Cancel a running job. If the job was started on another node, the request is
+    /// forwarded to that node so it can signal the in-memory cancellation token.
     pub async fn cancel_job(&self, job_id: &str) -> Result<()> {
-        self.registry.cancel(job_id).await
-    }
-
-    /// Get status of a specific job by ID. Finds active and retained terminal jobs.
-    pub async fn job_status(&self, job_id: &str) -> Result<BatchJobStatus> {
-        let snapshot = self
-            .registry
-            .get_active_job_snapshot(job_id)
-            .await
-            .ok_or_else(|| error::BatchError::JobNotFound(job_id.to_owned()))?;
-
-        Ok(BatchJobStatus {
-            last_metric: snapshot.to_job_metric(),
-        })
-    }
-
-    /// Get the status of the most recently created in-progress job.
-    /// Returns `None` if no active jobs exist.
-    pub async fn job_status_last_active(&self) -> Option<BatchJobStatus> {
-        let snapshot = self.registry.get_last_active_job_snapshot().await?;
-        Some(BatchJobStatus {
-            last_metric: snapshot.to_job_metric(),
-        })
-    }
-
-    /// Get status of all jobs within the retention window.
-    pub async fn job_status_all(&self) -> BatchJobStatusList {
-        let snapshots = self.registry.get_all_job_snapshots().await;
-        BatchJobStatusList {
-            statuses: snapshots
-                .into_iter()
-                .map(|s| BatchJobStatus {
-                    last_metric: s.to_job_metric(),
-                })
-                .collect(),
+        if self.is_local_job(job_id).await {
+            return self.registry.cancel(job_id).await;
         }
+        let base_url = Self::owner_base_url(job_id).expect("non-local job must have owner node");
+        self.peers.get(&base_url).await.cancel_job(job_id).await
     }
 
-    /// Get the original YAML definition for a job.
+    /// Get status of a specific job by ID. Forwarded to the owner node if needed.
+    pub async fn job_status(&self, job_id: &str) -> Result<BatchJobStatus> {
+        if self.is_local_job(job_id).await {
+            let snapshot = self
+                .registry
+                .get_active_job_snapshot(job_id)
+                .await
+                .ok_or_else(|| error::BatchError::JobNotFound(job_id.to_owned()))?;
+            return Ok(BatchJobStatus {
+                last_metric: snapshot.to_job_metric(),
+            });
+        }
+        let base_url = Self::owner_base_url(job_id).expect("non-local job must have owner node");
+        self.peers.get(&base_url).await.job_status(job_id).await
+    }
+
+    /// Get the status of the most recently created in-progress job across all nodes.
+    pub async fn job_status_last_active(&self) -> Option<BatchJobStatus> {
+        let local = self.registry.get_last_active_job_snapshot().await.map(|s| BatchJobStatus {
+            last_metric: s.to_job_metric(),
+        });
+
+        let peer_results = self.fan_out_status_all().await;
+
+        // Combine local + peer results; pick the one with the latest start time.
+        let mut candidates: Vec<BatchJobStatus> = peer_results.into_iter().flat_map(|r| r.statuses).collect();
+        if let Some(l) = local {
+            candidates.push(l);
+        }
+
+        candidates.into_iter().max_by_key(|s| s.last_metric.start_time)
+    }
+
+    /// Get status of all jobs within the retention window across all nodes.
+    pub async fn job_status_all(&self) -> BatchJobStatusList {
+        let mut statuses: Vec<BatchJobStatus> = self
+            .registry
+            .get_all_job_snapshots()
+            .await
+            .into_iter()
+            .map(|s| BatchJobStatus {
+                last_metric: s.to_job_metric(),
+            })
+            .collect();
+
+        for peer_list in self.fan_out_status_all().await {
+            statuses.extend(peer_list.statuses);
+        }
+
+        BatchJobStatusList { statuses }
+    }
+
+    /// Get the original YAML definition for a job. Forwarded to owner node if needed.
     pub async fn describe_job(&self, job_id: &str) -> Result<String> {
-        self.store.load_definition(job_id).await
+        if self.is_local_job(job_id).await {
+            return self.store.load_definition(job_id).await;
+        }
+        let base_url = Self::owner_base_url(job_id).expect("non-local job must have owner node");
+        self.peers.get(&base_url).await.describe_job(job_id).await
     }
 
-    /// List jobs filtered by type, status, and/or bucket (src or target).
+    /// List jobs filtered by type, status, and/or bucket across all nodes.
     pub async fn list_jobs(
         &self,
         job_type: Option<&str>,
         status: Option<&str>,
         bucket: Option<&str>,
     ) -> job::ListBatchJobsResult {
-        self.registry.list_jobs(job_type, status, bucket).await
+        let mut jobs = self.registry.list_jobs(job_type, status, bucket).await.jobs;
+
+        let peer_lists = self.fan_out_list_jobs(job_type, status, bucket).await;
+        for peer_result in peer_lists {
+            jobs.extend(peer_result.jobs);
+        }
+
+        job::ListBatchJobsResult { jobs }
+    }
+
+    /// Fan-out a status-all request to all non-local peer nodes concurrently.
+    /// Errors from individual peers are logged and skipped (best-effort).
+    async fn fan_out_status_all(&self) -> Vec<BatchJobStatusList> {
+        let peer_base_urls = self.non_local_peer_base_urls().await;
+        if peer_base_urls.is_empty() {
+            return vec![];
+        }
+
+        let peers = self.peers.clone();
+        let handles: Vec<_> = peer_base_urls
+            .into_iter()
+            .map(|url| {
+                let peers = peers.clone();
+                tokio::spawn(async move {
+                    let client = peers.get(&url).await;
+                    match client.job_status_all().await {
+                        Ok(list) => Some(list),
+                        Err(e) => {
+                            warn!(peer = %url, "fan-out job_status_all failed: {e}");
+                            None
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let mut results = Vec::new();
+        for h in handles {
+            if let Ok(Some(list)) = h.await {
+                results.push(list);
+            }
+        }
+        results
+    }
+
+    /// Fan-out a list-jobs request to all non-local peer nodes concurrently.
+    async fn fan_out_list_jobs(
+        &self,
+        job_type: Option<&str>,
+        status: Option<&str>,
+        bucket: Option<&str>,
+    ) -> Vec<job::ListBatchJobsResult> {
+        let peer_base_urls = self.non_local_peer_base_urls().await;
+        if peer_base_urls.is_empty() {
+            return vec![];
+        }
+
+        let peers = self.peers.clone();
+        let jt = job_type.map(str::to_owned);
+        let st = status.map(str::to_owned);
+        let bk = bucket.map(str::to_owned);
+
+        let handles: Vec<_> = peer_base_urls
+            .into_iter()
+            .map(|url| {
+                let peers = peers.clone();
+                let jt = jt.clone();
+                let st = st.clone();
+                let bk = bk.clone();
+                tokio::spawn(async move {
+                    let client = peers.get(&url).await;
+                    match client.list_jobs(jt.as_deref(), st.as_deref(), bk.as_deref()).await {
+                        Ok(r) => Some(r),
+                        Err(e) => {
+                            warn!(peer = %url, "fan-out list_jobs failed: {e}");
+                            None
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let mut results = Vec::new();
+        for h in handles {
+            if let Ok(Some(r)) = h.await {
+                results.push(r);
+            }
+        }
+        results
+    }
+
+    /// Return HTTP base URLs for all non-local cluster nodes.
+    async fn non_local_peer_base_urls(&self) -> Vec<String> {
+        let local = get_global_local_node_name().await;
+        get_global_endpoints()
+            .get_nodes()
+            .into_iter()
+            .filter(|n| !n.is_local)
+            .map(|n| {
+                let host = n.url.host_str().unwrap_or("");
+                let port = n.url.port().map(|p| format!(":{p}")).unwrap_or_default();
+                let scheme = n.url.scheme();
+                format!("{scheme}://{host}{port}")
+            })
+            .filter(|url| {
+                // Guard against misidentifying self when local node name is set.
+                local.is_empty() || !url.contains(&local)
+            })
+            .collect()
     }
 }
 
@@ -222,7 +393,6 @@ async fn init_batch_service_generic<S: StorageAPI + 'static>(ecstore: Arc<S>) ->
     for job in jobs_to_resume {
         info!(job_id = %job.id, "resuming interrupted batch job");
 
-        // Load the YAML definition to reconstruct the config.
         let yaml_str = match service.store.load_definition(&job.id).await {
             Ok(s) => s,
             Err(e) => {
@@ -269,7 +439,6 @@ async fn init_batch_service_generic<S: StorageAPI + 'static>(ecstore: Arc<S>) ->
         });
     }
 
-    // Spawn background eviction loop, removes registry entries older than retention window.
     let retention = job_retention();
     let registry_weak = Arc::downgrade(&service.registry);
     tokio::spawn(async move {
@@ -286,4 +455,29 @@ async fn init_batch_service_generic<S: StorageAPI + 'static>(ecstore: Arc<S>) ->
     });
 
     service
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_owner_node_with_node() {
+        let job_id = "replicate-abc123|node1:9000";
+        assert_eq!(parse_owner_node(job_id), Some("node1:9000"));
+    }
+
+    #[test]
+    fn test_parse_owner_node_single_node() {
+        let job_id = "replicate-abc123";
+        assert_eq!(parse_owner_node(job_id), None);
+    }
+
+    #[tokio::test]
+    async fn test_make_job_id_format_single_node() {
+        // GLOBAL_LOCAL_NODE_NAME is empty in tests, so no "|" suffix.
+        let id = make_job_id(&BatchJobType::Replicate).await;
+        assert!(id.starts_with("replicate-"), "id={id}");
+        assert!(!id.contains('|'), "id={id}");
+    }
 }

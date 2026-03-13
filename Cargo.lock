@@ -7302,6 +7302,8 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
+ "reqwest 0.13.2",
+ "rustfs-common",
  "rustfs-ecstore",
  "rustfs-madmin",
  "serde",
