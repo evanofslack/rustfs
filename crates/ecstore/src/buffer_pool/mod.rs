@@ -179,12 +179,12 @@ impl DerefMut for ShardBuf {
 
 impl Drop for ShardBuf {
     fn drop(&mut self) {
-        if self.pooled {
-            if let Some(v) = self.inner.take() {
-                SHARD_POOL.with(|pool| {
-                    pool.borrow_mut().return_buf(v);
-                });
-            }
+        if self.pooled
+            && let Some(v) = self.inner.take()
+        {
+            SHARD_POOL.with(|pool| {
+                pool.borrow_mut().return_buf(v);
+            });
         }
         // If not pooled, inner drops normally here.
     }
@@ -234,11 +234,11 @@ impl SlabPool {
 
     /// Return a buffer to the pool.  Drops it if the slab is full.
     fn return_buf(&mut self, v: AVec<u8, ConstAlign<ALIGN>>) {
-        if let Some(idx) = size_class_index(v.capacity()) {
-            if self.slabs[idx].len() < self.max_per_class {
-                self.slabs[idx].push(v);
-                return;
-            }
+        if let Some(idx) = size_class_index(v.capacity())
+            && self.slabs[idx].len() < self.max_per_class
+        {
+            self.slabs[idx].push(v);
+            return;
         }
         // Slab full or no matching class, let it drop.
         drop(v);
