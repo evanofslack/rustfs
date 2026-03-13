@@ -18,6 +18,7 @@ extern crate core;
 pub mod admin_server_info;
 pub mod batch_processor;
 pub mod bitrot;
+pub mod buffer_pool;
 pub mod bucket;
 pub mod cache_value;
 pub mod compress;

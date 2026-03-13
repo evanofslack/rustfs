@@ -36,6 +36,7 @@
 //! // Simulate loss and recovery...
 //! ```
 
+use crate::buffer_pool::pool_config::pool_put_enabled;
 use bytes::{Bytes, BytesMut};
 use reed_solomon_simd;
 use smallvec::SmallVec;
@@ -331,36 +332,67 @@ impl Erasure {
         // Total required size
         let need_total_size = per_shard_size * self.total_shard_count();
 
-        // Create a new buffer with the required total length for all shards
-        let mut data_buffer = BytesMut::with_capacity(need_total_size);
+        if pool_put_enabled() {
+            // Acquire a 4096-aligned, pooled buffer for the encode scratch space.
+            // The buffer is returned to the thread-local pool when `shard_buf` drops
+            // at the end of this block.
+            let mut shard_buf = crate::buffer_pool::acquire(need_total_size);
 
-        // Copy source data
-        data_buffer.extend_from_slice(data);
-        data_buffer.resize(need_total_size, 0u8);
+            // Populate: copy data into the front, zero-pad the rest.
+            let slice = shard_buf.full_slice_mut();
+            let copy_len = data.len().min(need_total_size);
+            slice[..copy_len].copy_from_slice(&data[..copy_len]);
+            if copy_len < need_total_size {
+                slice[copy_len..need_total_size].fill(0u8);
+            }
 
-        {
-            // EC encode, the result will be written into data_buffer
-            let data_slices: SmallVec<[&mut [u8]; 16]> = data_buffer.chunks_exact_mut(per_shard_size).collect();
-
-            // Only do EC if parity_shards > 0
-            if self.parity_shards > 0 {
-                if let Some(encoder) = self.encoder.as_ref() {
-                    encoder.encode(data_slices)?;
-                } else {
-                    warn!("parity_shards > 0, but encoder is None");
+            {
+                let data_slices: SmallVec<[&mut [u8]; 16]> = slice[..need_total_size].chunks_exact_mut(per_shard_size).collect();
+                if self.parity_shards > 0 {
+                    if let Some(encoder) = self.encoder.as_ref() {
+                        encoder.encode(data_slices)?;
+                    } else {
+                        warn!("parity_shards > 0, but encoder is None");
+                    }
                 }
             }
-        }
 
-        // Zero-copy split, all shards reference data_buffer
-        let mut data_buffer = data_buffer.freeze();
-        let mut shards = Vec::with_capacity(self.total_shard_count());
-        for _ in 0..self.total_shard_count() {
-            let shard = data_buffer.split_to(per_shard_size);
-            shards.push(shard);
-        }
+            // Copy each shard out into a Bytes. The per-shard copy is necessary
+            // because Bytes requires shared ownership and AVec cannot be split
+            // zero-copy the way BytesMut can. The pool benefit is the large
+            // allocation staying warm (no madvise / page-fault round-trip).
+            let shards = shard_buf.full_slice_mut()[..need_total_size]
+                .chunks(per_shard_size)
+                .map(Bytes::copy_from_slice)
+                .collect();
 
-        Ok(shards)
+            Ok(shards)
+        } else {
+            // Original BytesMut path, no buffer pool for vec.
+            let mut data_buffer = BytesMut::with_capacity(need_total_size);
+            data_buffer.extend_from_slice(data);
+            data_buffer.resize(need_total_size, 0u8);
+
+            {
+                let data_slices: SmallVec<[&mut [u8]; 16]> = data_buffer.chunks_exact_mut(per_shard_size).collect();
+                if self.parity_shards > 0 {
+                    if let Some(encoder) = self.encoder.as_ref() {
+                        encoder.encode(data_slices)?;
+                    } else {
+                        warn!("parity_shards > 0, but encoder is None");
+                    }
+                }
+            }
+
+            let mut data_buffer = data_buffer.freeze();
+            let mut shards = Vec::with_capacity(self.total_shard_count());
+            for _ in 0..self.total_shard_count() {
+                let shard = data_buffer.split_to(per_shard_size);
+                shards.push(shard);
+            }
+
+            Ok(shards)
+        }
     }
 
     /// Decode and reconstruct missing shards in-place.

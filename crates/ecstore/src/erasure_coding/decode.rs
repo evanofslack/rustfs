@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::buffer_pool::pool_config::pool_get_enabled;
 use crate::disk::error::Error;
 use crate::disk::error_reduce::reduce_errs;
 use crate::erasure_coding::{BitrotReader, Erasure};
@@ -83,20 +84,40 @@ where
         let mut shards: Vec<Option<Vec<u8>>> = vec![None; num_readers];
         let mut errs = vec![None; num_readers];
 
+        let use_pool = pool_get_enabled();
         let mut futures = Vec::with_capacity(self.total_shards);
         let reader_iter: std::slice::IterMut<'_, Option<BitrotReader<R>>> = self.readers.iter_mut();
         for (i, reader) in reader_iter.enumerate() {
             let future = if let Some(reader) = reader {
-                Box::pin(async move {
-                    let mut buf = vec![0u8; shard_size];
-                    match reader.read(&mut buf).await {
-                        Ok(n) => {
-                            buf.truncate(n);
-                            (i, Ok(buf))
+                if use_pool {
+                    // Acquire a 4096-aligned, pooled buffer. The buffer is
+                    // returned to the thread-local pool when `shard_buf` drops
+                    // (after `into_vec()` transfers the data out).
+                    let mut shard_buf = crate::buffer_pool::acquire(shard_size);
+                    Box::pin(async move {
+                        match reader.read(shard_buf.full_slice_mut()).await {
+                            Ok(n) => {
+                                shard_buf.set_len(n);
+                                (i, Ok(shard_buf.into_vec()))
+                            }
+                            Err(e) => (i, Err(Error::from(e))),
                         }
-                        Err(e) => (i, Err(Error::from(e))),
-                    }
-                }) as std::pin::Pin<Box<dyn std::future::Future<Output = (usize, Result<Vec<u8>, Error>)> + Send>>
+                    })
+                        as std::pin::Pin<Box<dyn std::future::Future<Output = (usize, Result<Vec<u8>, Error>)> + Send>>
+                } else {
+                    Box::pin(async move {
+                        // No buffer pool, just allocate new vec.
+                        let mut buf = vec![0u8; shard_size];
+                        match reader.read(&mut buf).await {
+                            Ok(n) => {
+                                buf.truncate(n);
+                                (i, Ok(buf))
+                            }
+                            Err(e) => (i, Err(Error::from(e))),
+                        }
+                    })
+                        as std::pin::Pin<Box<dyn std::future::Future<Output = (usize, Result<Vec<u8>, Error>)> + Send>>
+                }
             } else {
                 // Return FileNotFound error when reader is None
                 Box::pin(async move { (i, Err(Error::FileNotFound)) })
