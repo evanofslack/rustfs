@@ -80,7 +80,7 @@ impl JobRegistry {
         }
 
         let control = Arc::new(JobControl::new(workers));
-        let counters = Arc::new(JobCounters::default());
+        let counters = Arc::new(JobCounters::new(job.job_type.to_string(), job.id.clone(), source_bucket.to_owned()));
 
         dedup.insert(key.clone(), job.id.clone());
         drop(dedup);
@@ -264,9 +264,13 @@ impl JobRegistry {
                     entries.insert(
                         job.id.clone(),
                         RegistryEntry {
+                            counters: Arc::new(JobCounters::new(
+                                job.job_type.to_string(),
+                                job.id.clone(),
+                                job.source_bucket.clone(),
+                            )),
                             job,
                             control: Arc::new(JobControl::new(1)),
-                            counters: Arc::new(JobCounters::default()),
                         },
                     );
                 }

@@ -137,8 +137,14 @@ impl BatchJob {
 }
 
 /// In-memory atomic counters for a running job, shared between the enumerator and workers.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct JobCounters {
+    /// Job type string (e.g. `"replicate"`), stored for metric labels.
+    pub job_type: String,
+    /// Job ID, stored for per-object metric labels.
+    pub job_id: String,
+    /// Source bucket name, stored for metric labels.
+    pub source_bucket: String,
     pub objects: AtomicI64,
     pub objects_failed: AtomicI64,
     pub bytes_transferred: AtomicI64,
@@ -146,14 +152,28 @@ pub struct JobCounters {
 }
 
 impl JobCounters {
+    pub fn new(job_type: String, job_id: String, source_bucket: String) -> Self {
+        Self {
+            job_type,
+            job_id,
+            source_bucket,
+            objects: AtomicI64::new(0),
+            objects_failed: AtomicI64::new(0),
+            bytes_transferred: AtomicI64::new(0),
+            bytes_failed: AtomicI64::new(0),
+        }
+    }
+
     pub fn inc_success(&self, bytes: i64) {
         self.objects.fetch_add(1, Ordering::Relaxed);
         self.bytes_transferred.fetch_add(bytes, Ordering::Relaxed);
+        crate::metrics::record_object_processed(&self.job_type, &self.job_id, &self.source_bucket, bytes);
     }
 
     pub fn inc_failure(&self, bytes: i64) {
         self.objects_failed.fetch_add(1, Ordering::Relaxed);
         self.bytes_failed.fetch_add(bytes, Ordering::Relaxed);
+        crate::metrics::record_object_failed(&self.job_type, &self.job_id, &self.source_bucket);
     }
 
     /// Reset failure counters before a retry pass so metrics don't double-count
@@ -267,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_job_counters() {
-        let c = JobCounters::default();
+        let c = JobCounters::new("replicate".into(), "job-1".into(), "src".into());
         c.inc_success(1024);
         c.inc_success(2048);
         c.inc_failure(512);
@@ -280,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_reset_failures_clears_only_failure_counters() {
-        let c = JobCounters::default();
+        let c = JobCounters::new("replicate".into(), "job-2".into(), "src".into());
         c.inc_success(1024);
         c.inc_failure(512);
         c.inc_failure(256);

@@ -29,6 +29,7 @@
 pub mod client;
 pub mod error;
 pub mod job;
+pub mod metrics;
 pub mod registry;
 pub mod store;
 pub mod worker;
@@ -222,6 +223,7 @@ impl<S: StorageAPI + 'static> BatchService<S> {
 ///
 /// Called from `rustfs/src/main.rs` during startup.
 pub async fn init_batch_service(ecstore: Arc<ECStore>) -> Arc<BatchService<ECStore>> {
+    metrics::register_batch_metrics();
     let service = init_batch_service_generic(ecstore).await;
     set_global_batch_service(service.clone());
     service

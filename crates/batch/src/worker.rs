@@ -102,6 +102,8 @@ pub async fn run_replicate_job_arc<S: StorageAPI + 'static>(
         }
     }
 
+    crate::metrics::record_job_started(&job.job_type.to_string(), &source_bucket, &target_bucket);
+
     let result = run_replication_passes(
         &job,
         &config,
@@ -131,8 +133,15 @@ pub async fn run_replicate_job_arc<S: StorageAPI + 'static>(
     registry.set_status(&job_id, final_status.clone()).await;
 
     if let Some(mut snapshot) = registry.get_job(&job_id).await {
-        snapshot.status = final_status;
+        snapshot.status = final_status.clone();
         snapshot.finished_at = Some(Utc::now());
+        crate::metrics::record_job_terminal(
+            &job.job_type.to_string(),
+            &source_bucket,
+            &target_bucket,
+            &final_status.to_string(),
+            snapshot.elapsed_nanos() as f64 / 1_000_000_000.0,
+        );
         if let Err(e) = store.save_job(&snapshot).await {
             error!(job_id = %job_id, "fail persist final batch job state: {e}");
         }

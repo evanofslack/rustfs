@@ -37,7 +37,7 @@ ftps = ["rustfs-protocols/ftps"]
 swift = ["rustfs-protocols/swift"]
 webdav = ["rustfs-protocols/webdav"]
 batch-operations = ["dep:rustfs-batch"]
-full = ["metrics", "ftps", "swift", "web-dav", "batch-operations"]
+full = ["metrics", "ftps", "swift", "webdav", "batch-operations"]
 
 [lints]
 workspace = true
