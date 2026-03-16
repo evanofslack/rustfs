@@ -33,7 +33,9 @@ workspace = true
 rustfs-ecstore = { workspace = true }
 rustfs-madmin = { workspace = true }
 rustfs-common = { workspace = true }
+rustfs-utils = { workspace = true, features = ["full"] }
 metrics = { workspace = true }
+
 
 aws-sdk-s3 = { workspace = true }
 
